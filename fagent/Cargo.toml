@@ -1,0 +1,8 @@
+[package]
+name = "fagent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gitfetcher = { path = "../gitfetcher" }
+econfetcher = { path = "../econfetcher" }
