@@ -125,12 +125,12 @@ pub async fn fetch_repo_fork_network(
 ) -> Result<Vec<RepoFork>> {
     let mut forks = Vec::new();
     let mut processed_repos = std::collections::HashSet::new();
-    let mut queue: std::collections::VecDeque<(u64, String, usize)> = std::collections::VecDeque::new();
+    let queue: std::collections::VecDeque<(u64, String, usize)> = std::collections::VecDeque::new();
     
     // Start with the target repository
     let repo_info = fetcher.octocrab.repos(owner, repo).get().await?;
     let source_repo_id = repo_info.id.0;
-    let source_repo_name = format!("{}/{}", owner, repo);
+    let _source_repo_name = format!("{}/{}", owner, repo);
     processed_repos.insert(source_repo_id);
     
     // Add immediate forks
