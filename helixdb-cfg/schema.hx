@@ -151,12 +151,12 @@ schema::3 {
 
     // --- Code Hierarchy Edges (within a Version) ---
     E::CONTAINS_CODE { From: VERSION, To: FILE }
-    E::DEFINES { From: FILE, To: CLASS }
-    E::DEFINES { From: FILE, To: FUNCTION }
-    E::DEFINES { From: FILE, To: DATA_MODEL }
-    E::DEFINES { From: FILE, To: VARIABLE }
-    E::DEFINES { From: FILE, To: TEST }
-    E::DEFINES { From: FILE, To: ENDPOINT }
+    E::DEFINES_CLASS { From: FILE, To: CLASS }
+    E::DEFINES_FUNCTION { From: FILE, To: FUNCTION }
+    E::DEFINES_DATA_MODEL { From: FILE, To: DATA_MODEL }
+    E::DEFINES_VARIABLE { From: FILE, To: VARIABLE }
+    E::DEFINES_TEST { From: FILE, To: TEST }
+    E::DEFINES_ENDPOINT { From: FILE, To: ENDPOINT }
     E::DEPENDS_ON { From: FILE, To: LIBRARY }
 
     // --- Code-Level Relationship Edges (from stackgraph-ast) ---
@@ -170,13 +170,13 @@ schema::3 {
     E::IMPORTS { From: FILE, To: FILE }
 
     // --- Testing Edges ---
-    E::TESTS { From: TEST, To: FUNCTION }
-    E::TESTS { From: TEST, To: CLASS }
-    E::TESTS { From: TEST, To: ENDPOINT }
+    E::TESTS_FUNCTION { From: TEST, To: FUNCTION }
+    E::TESTS_CLASS { From: TEST, To: CLASS }
+    E::TESTS_ENDPOINT { From: TEST, To: ENDPOINT }
 
     // --- Documentation and Content Edges ---
     E::CONTAINS_CONTENT { From: PROJECT, To: README_CHUNK }
     E::DOCUMENTS { From: README_CHUNK, To: FUNCTION } // A doc chunk explaining a function
-    E::HAS_EMBEDDING { From: FUNCTION, To: CODE_CHUNK }
-    E::HAS_EMBEDDING { From: CLASS, To: CODE_CHUNK }
+    E::HAS_EMBEDDING_FROM_FUNCTION { From: FUNCTION, To: CODE_CHUNK }
+    E::HAS_EMBEDDING_FROM_CLASS { From: CLASS, To: CODE_CHUNK }
 }
