@@ -1,0 +1,3 @@
+[submodule "helix-db"]
+	path = helix-db
+	url = https://github.com/HelixDB/helix-db.git
