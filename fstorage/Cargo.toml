@@ -17,5 +17,5 @@ async-trait = "0.1.77"
 url = "2.5.0"
 log = "0.4.21"
 env_logger = "0.11.3"
-helix-db = { path = "../helix-db", default-features = false, features = ["compiler", "vectors", "reqwest"] }
+helix-db = { git = "https://github.com/HelixDB/helix-db.git", default-features = false, features = ["compiler", "vectors", "reqwest"] }
 chrono = "0.4.31"

@@ -5,3 +5,5 @@
 **/implementation_plan.md
 **/.env
 **/*.pest
+**/*.txt
+/references
