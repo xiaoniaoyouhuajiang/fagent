@@ -2,6 +2,7 @@
 name = "fstorage"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
 
 [dev-dependencies]
 tempfile = "3.10.1"
@@ -14,8 +15,16 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 thiserror = "1.0"
 async-trait = "0.1.77"
-url = "2.5.0"
+url = "2.5.2"
 log = "0.4.21"
 env_logger = "0.11.3"
-helix-db = { git = "https://github.com/HelixDB/helix-db.git", default-features = false, features = ["compiler", "vectors", "reqwest"] }
-chrono = "0.4.31"
+reqwest = { version = "0.12.5", features = ["json"] }
+helix-db = { git = "https://github.com/HelixDB/helix-db", features = ["full"] }
+# helix-db = { path = "../deps/helix-db", features = ["full"] }
+chrono = { version = "0.4.39", features = ["serde"] }
+deltalake = { version = "0.17.0", features = ["datafusion"] }
+
+[build-dependencies]
+helix-db = { git = "https://github.com/HelixDB/helix-db", features = ["full"] }
+# helix-db = { path = "../deps/helix-db", features = ["full"] }
+anyhow = "1.0"

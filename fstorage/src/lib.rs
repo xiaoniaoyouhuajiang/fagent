@@ -1,15 +1,17 @@
 pub mod catalog;
 pub mod config;
 pub mod errors;
+pub mod fetch;
 pub mod lake;
 pub mod models;
+pub mod schemas;
 pub mod sync;
 
 use crate::catalog::Catalog;
 use crate::config::StorageConfig;
-use crate::errors::{Result, StorageError};
+use crate::errors::Result;
 use crate::lake::Lake;
-use crate::sync::{DataSynchronizer, FStorageSynchronizer};
+use crate::sync::{FStorageSynchronizer};
 use helix_db::helix_engine::traversal_core::{HelixGraphEngine, HelixGraphEngineOpts};
 use std::sync::Arc;
 
@@ -43,7 +45,7 @@ pub struct FStorage {
     pub catalog: Arc<Catalog>,
     pub lake: Arc<Lake>,
     pub engine: Arc<HelixGraphEngine>,
-    pub synchronizer: Arc<dyn DataSynchronizer + Send + Sync>,
+    pub synchronizer: Arc<FStorageSynchronizer>,
 }
 
 impl FStorage {

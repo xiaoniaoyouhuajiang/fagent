@@ -1,5 +1,6 @@
 use crate::catalog::Catalog;
 use crate::errors::Result;
+use crate::fetch::{Fetchable, Fetcher};
 use crate::lake::Lake;
 use crate::models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext};
 use async_trait::async_trait;
@@ -22,14 +23,10 @@ pub trait DataSynchronizer {
         entities: &[EntityIdentifier],
     ) -> Result<HashMap<String, ReadinessReport>>;
 
-    /// Performs a budgeted data completion operation.
-    ///
-    /// This is the core function for dynamic data fetching. It attempts to fetch
-    /// new data from external APIs within a given budget (e.g., time or request count),
-    /// writes it to the bronze layer, processes it into the silver layer, and updates
-    /// the metadata catalog.
-    async fn budgeted_complete(
+    /// Performs a budgeted data completion operation for a specific entity type.
+    async fn budgeted_complete<T: Fetchable>(
         &self,
+        fetcher: Arc<dyn Fetcher<T>>,
         context: SyncContext,
         budget: SyncBudget,
     ) -> Result<HashMap<String, ReadinessReport>>;
@@ -48,7 +45,6 @@ pub struct FStorageSynchronizer {
     catalog: Arc<Catalog>,
     lake: Arc<Lake>,
     engine: Arc<HelixGraphEngine>,
-    // http_client, etc. would go here
 }
 
 impl FStorageSynchronizer {
@@ -98,41 +94,35 @@ impl DataSynchronizer for FStorageSynchronizer {
         Ok(reports)
     }
 
-    async fn budgeted_complete(
+    async fn budgeted_complete<T: Fetchable>(
         &self,
+        fetcher: Arc<dyn Fetcher<T>>,
         context: SyncContext,
         _budget: SyncBudget,
     ) -> Result<HashMap<String, ReadinessReport>> {
         let task_name = format!("budgeted_complete_for_{:?}", context.target_entities);
         let task_id = self.catalog.create_task_log(&task_name)?;
 
-        // --- This is where the actual data fetching and processing logic would go ---
-        // For now, we'll simulate a successful run.
-
-        // 1. Check API budget (placeholder)
-        // 2. Fetch data from external source (placeholder)
-        let fetched_data: Vec<serde_json::Value> = vec![]; // Simulate empty fetch
-
-        // 3. Write raw data to bronze layer
-        let now = chrono::Utc::now();
-        let timestamp = now.timestamp();
-        let data_to_write = serde_json::json!(fetched_data);
-        
         for entity in &context.target_entities {
-             let path = format!(
-                "bronze/{}/{}_{}.json",
-                entity.entity_type, timestamp, entity.uri.replace('/', "_")
-            );
-            self.lake.write_data(&path, &data_to_write).await?;
-        }
+            // 1. Fetch data from external source using the provided fetcher
+            let fetched_data: Vec<T> = fetcher.fetch(&entity.uri).await?;
 
-        // 4. Run micro-ETL to silver layer (placeholder)
-        // In a real implementation, this would involve reading bronze, transforming,
-        // and writing to silver paths.
+            if fetched_data.is_empty() {
+                continue;
+            }
 
-        // 5. Update catalog
-        let now = chrono::Utc::now().timestamp();
-        for entity in &context.target_entities {
+            // 2. Convert fetched data to a RecordBatch
+            let batch = T::to_record_batch(fetched_data.into_iter())?;
+
+            // 3. Write to the silver layer in Delta Lake format, using merge for idempotency
+            let table_name = T::table_name();
+            let primary_keys = T::primary_keys();
+            self.lake
+                .write_batches(&table_name, vec![batch], Some(primary_keys))
+                .await?;
+
+            // 4. Update catalog
+            let now = chrono::Utc::now().timestamp();
             let readiness = crate::models::EntityReadiness {
                 entity_uri: entity.uri.clone(),
                 entity_type: entity.entity_type.clone(),
@@ -142,9 +132,12 @@ impl DataSynchronizer for FStorageSynchronizer {
             };
             self.catalog.upsert_readiness(&readiness)?;
         }
-        // --- End of placeholder logic ---
 
-        self.catalog.update_task_log_status(task_id, "SUCCESS", "Completed successfully (simulated).")?;
+        self.catalog.update_task_log_status(
+            task_id,
+            "SUCCESS",
+            "Completed successfully.",
+        )?;
 
         // Return the new readiness status
         self.check_readiness(&context.target_entities).await
@@ -165,11 +158,15 @@ impl DataSynchronizer for FStorageSynchronizer {
         //        let node = ...; // transform row to helix-db node
         //        self.engine.add_node(node)?;
         //    }
-        
+
         // For now, we just log success.
         // --- End of placeholder logic ---
 
-        self.catalog.update_task_log_status(task_id, "SUCCESS", "ETL completed successfully (simulated).")?;
+        self.catalog.update_task_log_status(
+            task_id,
+            "SUCCESS",
+            "ETL completed successfully (simulated).",
+        )?;
         Ok(())
     }
 }

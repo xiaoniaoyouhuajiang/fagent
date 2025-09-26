@@ -14,6 +14,12 @@ pub enum StorageError {
     #[error("Graph engine operation failed: {0}")]
     Graph(#[from] helix_db::helix_engine::types::GraphError),
 
+    #[error("DeltaLake operation failed: {0}")]
+    Delta(#[from] deltalake::DeltaTableError),
+
+    #[error("Arrow operation failed: {0}")]
+    Arrow(#[from] deltalake::arrow::error::ArrowError),
+
     #[error("Configuration error: {0}")]
     Config(String),
 

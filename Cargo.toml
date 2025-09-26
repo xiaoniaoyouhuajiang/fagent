@@ -1,8 +1,11 @@
 [workspace]
-resolver = "2"
 members = [
-    "gitfetcher",
-    "econfetcher",
     "fagent",
     "fstorage",
+    "gitfetcher",
+    "econfetcher",
+    "deps/helix-db",
+    "deps/helix-macros",
+    "deps/metrics",
 ]
+resolver = "2"
