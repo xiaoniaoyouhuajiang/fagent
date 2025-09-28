@@ -2,9 +2,8 @@ use crate::config::StorageConfig;
 use crate::errors::{Result, StorageError};
 use deltalake::arrow::record_batch::RecordBatch;
 use deltalake::operations::create::CreateBuilder;
-use deltalake::operations::write::WriteBuilder;
+// use deltalake::operations::write::WriteBuilder;
 use deltalake::{DeltaTable};
-use std::sync::Arc;
 
 pub struct Lake {
     config: StorageConfig,
@@ -71,6 +70,7 @@ mod tests {
         datatypes::{DataType, Field, Schema},
     };
     use tempfile::tempdir;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_write_and_read_delta_table() {

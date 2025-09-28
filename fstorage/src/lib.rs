@@ -11,7 +11,7 @@ use crate::catalog::Catalog;
 use crate::config::StorageConfig;
 use crate::errors::Result;
 use crate::lake::Lake;
-use crate::sync::{FStorageSynchronizer};
+use crate::sync::FStorageSynchronizer;
 use helix_db::helix_engine::traversal_core::{HelixGraphEngine, HelixGraphEngineOpts};
 use std::sync::Arc;
 

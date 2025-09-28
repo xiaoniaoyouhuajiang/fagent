@@ -4,10 +4,8 @@ version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
-[dev-dependencies]
-tempfile = "3.10.1"
-
 [dependencies]
+tempfile = "3.10.1"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -23,6 +21,10 @@ helix-db = { git = "https://github.com/HelixDB/helix-db", features = ["full"] }
 # helix-db = { path = "../deps/helix-db", features = ["full"] }
 chrono = { version = "0.4.39", features = ["serde"] }
 deltalake = { version = "0.17.0", features = ["datafusion"] }
+
+[[bin]]
+name = "schema_test"
+path = "src/bin/schema_test.rs"
 
 [build-dependencies]
 helix-db = { git = "https://github.com/HelixDB/helix-db", features = ["full"] }
