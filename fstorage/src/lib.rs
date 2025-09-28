@@ -1,3 +1,4 @@
+pub mod auto_fetchable;
 pub mod catalog;
 pub mod config;
 pub mod errors;

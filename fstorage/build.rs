@@ -34,15 +34,18 @@ fn main() -> anyhow::Result<()> {
     writeln!(file, "use serde::{{Deserialize, Serialize}};")?;
     writeln!(file, "use chrono::{{DateTime, Utc}};")?;
     writeln!(file, "use helix_db::utils::id::ID;")?;
+    writeln!(file, "use crate::fetch::Fetchable;")?;
+    writeln!(file, "use std::sync::Arc;")?;
     writeln!(file, "")?;
 
     if let Some(latest_schema) = ast.get_schemas_in_order().last() {
         for node_schema in &latest_schema.node_schemas {
+            let struct_name = &node_schema.name.1;
             writeln!(
                 file,
                 "#[derive(Debug, Serialize, Deserialize, Clone)]"
             )?;
-            writeln!(file, "pub struct {} {{", node_schema.name.1)?;
+            writeln!(file, "pub struct {} {{", struct_name)?;
             for field in &node_schema.fields {
                 let field_name = &field.name;
                 let field_type = map_type_to_rust(&field.field_type);
@@ -50,27 +53,122 @@ fn main() -> anyhow::Result<()> {
             }
             writeln!(file, "}}")?;
             writeln!(file, "")?;
-        }
 
-        for edge_schema in &latest_schema.edge_schemas {
-            writeln!(
-                file,
-                "#[derive(Debug, Serialize, Deserialize, Clone)]"
-            )?;
-            writeln!(file, "pub struct {} {{", edge_schema.name.1)?;
-            if let Some(properties) = &edge_schema.properties {
-                for field in properties {
-                    let field_name = &field.name;
-                    let field_type = map_type_to_rust(&field.field_type);
-                    writeln!(file, "    pub {}: {},", field_name, field_type)?;
-                }
-            }
-            writeln!(file, "}}")?;
+            // Generate Fetchable implementation for this struct
+            generate_fetchable_impl(&mut file, struct_name, &node_schema.fields)?;
             writeln!(file, "")?;
         }
+
+        // Note: Edge implementation is omitted for now as we focus on nodes first.
     }
 
     Ok(())
+}
+
+fn generate_fetchable_impl(file: &mut File, struct_name: &str, fields: &[helix_db::helixc::parser::types::Field]) -> anyhow::Result<()> {
+    writeln!(file, "impl Fetchable for {} {{", struct_name)?;
+    writeln!(file, "    const ENTITY_TYPE: &'static str = \"{}\";", struct_name.to_lowercase())?;
+    writeln!(file, "")?;
+    
+    // 生成 primary_keys 方法
+    writeln!(file, "    fn primary_keys() -> Vec<&'static str> {{")?;
+    let index_fields: Vec<&String> = fields.iter()
+        .filter(|f| f.is_indexed())
+        .map(|f| &f.name)
+        .collect();
+    
+    if index_fields.is_empty() {
+        // 如果没有 INDEX 字段，使用第一个字段
+        if let Some(first_field) = fields.first() {
+            writeln!(file, "        vec![\"{}\"]", first_field.name)?;
+        } else {
+            writeln!(file, "        vec![]")?;
+        }
+    } else {
+        writeln!(file, "        vec![{}]", index_fields.iter()
+            .map(|name| format!("\"{}\"", name))
+            .collect::<Vec<_>>()
+            .join(", "))?;
+    }
+    writeln!(file, "    }}")?;
+    writeln!(file, "")?;
+    
+    // 生成 to_record_batch 方法
+    writeln!(file, "    fn to_record_batch(data: impl IntoIterator<Item = Self>) -> crate::errors::Result<deltalake::arrow::record_batch::RecordBatch> {{")?;
+    writeln!(file, "        let data: Vec<Self> = data.into_iter().collect();")?;
+    writeln!(file, "        if data.is_empty() {{")?;
+    writeln!(file, "            // Return empty record batch with correct schema")?;
+    writeln!(file, "            use deltalake::arrow::datatypes::{{Field, Schema, DataType}};")?;
+    writeln!(file, "            let schema = Schema::new(vec![")?;
+    for field in fields {
+        let arrow_type = map_to_arrow_type(&field.field_type);
+        let nullable = !matches!(field.field_type, FieldType::String | FieldType::I64 | FieldType::I32 | FieldType::I16 | FieldType::I8 | FieldType::U64 | FieldType::U32 | FieldType::U16 | FieldType::U8 | FieldType::F64 | FieldType::F32 | FieldType::Boolean);
+        writeln!(file, "                Field::new(\"{0}\", {1}, {2}),", field.name, arrow_type, nullable)?;
+    }
+    writeln!(file, "            ]);")?;
+    writeln!(file, "            return Ok(deltalake::arrow::record_batch::RecordBatch::new_empty(Arc::new(schema)));")?;
+    writeln!(file, "        }}")?;
+    writeln!(file, "")?;
+    
+    // 为每个字段生成数据收集代码
+    writeln!(file, "        // Collect field data")?;
+    for field in fields {
+        let field_type_str = map_type_to_rust(&field.field_type);
+        writeln!(file, "        let {0}_data: Vec<{1}> = data.iter().map(|item| item.{0}.clone()).collect();", 
+                field.name, field_type_str)?;
+    }
+    writeln!(file, "")?;
+    
+    // 生成 Arrow arrays
+    writeln!(file, "        // Create Arrow arrays")?;
+    writeln!(file, "        let mut arrays = Vec::new();")?;
+    for field in fields {
+        writeln!(file, "        arrays.push(crate::auto_fetchable::to_arrow_array({}_data)?);", field.name)?;
+    }
+    writeln!(file, "")?;
+    
+    // 创建 Schema
+    writeln!(file, "        // Create schema")?;
+    writeln!(file, "        use deltalake::arrow::datatypes::{{Field, Schema, DataType}};")?;
+    writeln!(file, "        let schema = Schema::new(vec![")?;
+    for field in fields {
+        let arrow_type = map_to_arrow_type(&field.field_type);
+        let nullable = !matches!(field.field_type, FieldType::String | FieldType::I64 | FieldType::I32 | FieldType::I16 | FieldType::I8 | FieldType::U64 | FieldType::U32 | FieldType::U16 | FieldType::U8 | FieldType::F64 | FieldType::F32 | FieldType::Boolean);
+        writeln!(file, "            Field::new(\"{0}\", {1}, {2}),", field.name, arrow_type, nullable)?;
+    }
+    writeln!(file, "        ]);")?;
+    writeln!(file, "")?;
+    
+    // 创建 RecordBatch
+    writeln!(file, "        deltalake::arrow::record_batch::RecordBatch::try_new(Arc::new(schema), arrays)")?;
+    writeln!(file, "            .map_err(|e| crate::errors::StorageError::Arrow(e.into()))")?;
+    writeln!(file, "    }}")?;
+    writeln!(file, "}}")?;
+    
+    Ok(())
+}
+
+fn map_to_arrow_type(field_type: &FieldType) -> String {
+    match field_type {
+        FieldType::String => "DataType::Utf8".to_string(),
+        FieldType::F32 => "DataType::Float32".to_string(),
+        FieldType::F64 => "DataType::Float64".to_string(),
+        FieldType::I8 => "DataType::Int8".to_string(),
+        FieldType::I16 => "DataType::Int16".to_string(),
+        FieldType::I32 => "DataType::Int32".to_string(),
+        FieldType::I64 => "DataType::Int64".to_string(),
+        FieldType::U8 => "DataType::UInt8".to_string(),
+        FieldType::U16 => "DataType::UInt16".to_string(),
+        FieldType::U32 => "DataType::UInt32".to_string(),
+        FieldType::U64 => "DataType::UInt64".to_string(),
+        FieldType::U128 => "DataType::UInt128".to_string(),
+        FieldType::Boolean => "DataType::Boolean".to_string(),
+        FieldType::Uuid => "DataType::Utf8".to_string(), // UUID 作为字符串存储
+        FieldType::Date => "DataType::Timestamp(deltalake::arrow::datatypes::TimeUnit::Microsecond, Some(\"UTC\".into()))".to_string(),
+        FieldType::Array(_) => "DataType::List(Arc::new(Field::new(\"item\", DataType::Utf8, true)))".to_string(), // 简化处理
+        FieldType::Object(_) => "DataType::Utf8".to_string(), // JSON 对象作为字符串存储
+        FieldType::Identifier(_) => "DataType::Utf8".to_string(), // 标识符作为字符串存储
+    }
 }
 
 fn map_type_to_rust(field_type: &FieldType) -> String {
