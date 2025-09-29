@@ -1,7 +1,6 @@
-use fstorage::{FStorage, config::StorageConfig};
+use fstorage::{FStorage, config::StorageConfig, schemas::{PROJECT, DEVELOPER, COMMIT, VERSION, ISSUE}, fetch::Fetchable};
 use tempfile::tempdir;
-use deltalake::arrow::{array::{StringArray, Int64Array}, datatypes::{DataType, Field, Schema}, record_batch::RecordBatch};
-use std::sync::Arc;
+use chrono::{DateTime, Utc};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,58 +25,103 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test creating Delta tables for each schema entity type
     println!("\n🚀 Creating schema-based Delta tables...");
     
-    // Create PROJECT entities table
-    let project_schema = Arc::new(Schema::new(vec![
-        Field::new("url", DataType::Utf8, false),
-        Field::new("name", DataType::Utf8, false),
-        Field::new("description", DataType::Utf8, true),
-        Field::new("language", DataType::Utf8, true),
-        Field::new("stars", DataType::Int64, true),
-        Field::new("forks", DataType::Int64, true),
-    ]));
+    // Create PROJECT entities using generated schema struct
+    let sample_projects = vec![
+        PROJECT {
+            url: Some("https://github.com/rust-lang/rust".to_string()),
+            name: Some("Rust".to_string()),
+            description: Some("The Rust Programming Language".to_string()),
+            language: Some("Rust".to_string()),
+            stars: Some(91000),
+            forks: Some(19000),
+        },
+        PROJECT {
+            url: Some("https://github.com/tokio-rs/tokio".to_string()),
+            name: Some("Tokio".to_string()),
+            description: Some("A runtime for writing reliable network applications".to_string()),
+            language: Some("Rust".to_string()),
+            stars: Some(23000),
+            forks: Some(3500),
+        },
+    ];
     
-    let sample_projects = RecordBatch::try_new(
-        project_schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec![
-                "https://github.com/rust-lang/rust",
-                "https://github.com/tokio-rs/tokio",
-            ])),
-            Arc::new(StringArray::from(vec!["Rust", "Tokio"])),
-            Arc::new(StringArray::from(vec![
-                "The Rust Programming Language",
-                "A runtime for writing reliable network applications",
-            ])),
-            Arc::new(StringArray::from(vec!["Rust", "Rust"])),
-            Arc::new(Int64Array::from(vec![91000, 23000])),
-            Arc::new(Int64Array::from(vec![19000, 3500])),
-        ],
-    )?;
+    // Convert PROJECT entities to RecordBatch using generated Fetchable implementation
+    let projects_batch = PROJECT::to_record_batch(sample_projects.clone())?;
     
     // Write PROJECT entities to silver layer
     println!("📊 Writing PROJECT entities to silver layer...");
-    storage.lake.write_batches("silver/entities/projects", vec![sample_projects], None).await?;
+    storage.lake.write_batches("silver/entities/projects", vec![projects_batch], None).await?;
     
-    // Create DEVELOPER entities table
-    let developer_schema = Arc::new(Schema::new(vec![
-        Field::new("name", DataType::Utf8, false),
-        Field::new("followers", DataType::Int64, true),
-        Field::new("location", DataType::Utf8, true),
-        Field::new("email", DataType::Utf8, true),
-    ]));
+    // Create DEVELOPER entities using generated schema struct
+    let sample_developers = vec![
+        DEVELOPER {
+            name: Some("alice".to_string()),
+            followers: Some(120),
+            location: Some("San Francisco".to_string()),
+            email: Some("alice@example.com".to_string()),
+        },
+        DEVELOPER {
+            name: Some("bob".to_string()),
+            followers: Some(85),
+            location: Some("New York".to_string()),
+            email: Some("bob@example.com".to_string()),
+        },
+    ];
     
-    let sample_developers = RecordBatch::try_new(
-        developer_schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["alice", "bob"])),
-            Arc::new(Int64Array::from(vec![120, 85])),
-            Arc::new(StringArray::from(vec!["San Francisco", "New York"])),
-            Arc::new(StringArray::from(vec!["alice@example.com", "bob@example.com"])),
-        ],
-    )?;
+    // Convert DEVELOPER entities to RecordBatch using generated Fetchable implementation
+    let developers_batch = DEVELOPER::to_record_batch(sample_developers.clone())?;
     
     println!("👤 Writing DEVELOPER entities to silver layer...");
-    storage.lake.write_batches("silver/entities/developers", vec![sample_developers], None).await?;
+    storage.lake.write_batches("silver/entities/developers", vec![developers_batch], None).await?;
+    
+    // Test additional entity types
+    println!("\n🚀 Testing additional entity types...");
+    
+    // Test COMMIT entities
+    let sample_commits = vec![
+        COMMIT {
+            sha: Some("abc123".to_string()),
+            message: Some("Initial commit".to_string()),
+            committed_at: Some(DateTime::from_timestamp(1640995200, 0).unwrap()), // 2022-01-01
+        },
+        COMMIT {
+            sha: Some("def456".to_string()),
+            message: Some("Add feature".to_string()),
+            committed_at: Some(DateTime::from_timestamp(1641081600, 0).unwrap()), // 2022-01-02
+        },
+    ];
+    
+    let commits_batch = COMMIT::to_record_batch(sample_commits)?;
+    println!("📝 Writing COMMIT entities to silver layer...");
+    storage.lake.write_batches("silver/entities/commits", vec![commits_batch], None).await?;
+    
+    // Test VERSION entities
+    let sample_versions = vec![
+        VERSION {
+            sha: Some("v1.0.0".to_string()),
+            tag: Some("1.0.0".to_string()),
+            is_head: Some(false),
+            created_at: Some(DateTime::from_timestamp(1640995200, 0).unwrap()),
+        },
+    ];
+    
+    let versions_batch = VERSION::to_record_batch(sample_versions)?;
+    println!("🏷️  Writing VERSION entities to silver layer...");
+    storage.lake.write_batches("silver/entities/versions", vec![versions_batch], None).await?;
+    
+    // Test ISSUE entities
+    let sample_issues = vec![
+        ISSUE {
+            number: Some(42),
+            title: Some("Bug in login".to_string()),
+            state: Some("open".to_string()),
+            created_at: Some(DateTime::from_timestamp(1640995200, 0).unwrap()),
+        },
+    ];
+    
+    let issues_batch = ISSUE::to_record_batch(sample_issues)?;
+    println!("🐛 Writing ISSUE entities to silver layer...");
+    storage.lake.write_batches("silver/entities/issues", vec![issues_batch], None).await?;
     
     // Check final directory structure
     println!("\n📂 Final DataLake directory structure:");
@@ -95,6 +139,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✅ Entity tables: {}/silver/entities/", config.lake_path.display());
     println!("✅ PROJECT table: {}/silver/entities/projects/", config.lake_path.display());
     println!("✅ DEVELOPER table: {}/silver/entities/developers/", config.lake_path.display());
+    println!("✅ COMMIT table: {}/silver/entities/commits/", config.lake_path.display());
+    println!("✅ VERSION table: {}/silver/entities/versions/", config.lake_path.display());
+    println!("✅ ISSUE table: {}/silver/entities/issues/", config.lake_path.display());
+    println!("✅ Total entities tested: 6 types");
     
     Ok(())
 }
@@ -131,24 +179,24 @@ fn print_dir_structure(path: &std::path::Path) -> std::io::Result<()> {
 async fn verify_delta_tables(storage: &FStorage) -> Result<(), Box<dyn std::error::Error>> {
     let base_path = &storage.config.lake_path;
     
-    // Check PROJECT table
-    match deltalake::open_table(base_path.join("silver/entities/projects").to_str().unwrap()).await {
-        Ok(table) => {
-            println!("  ✅ PROJECT table: {} files, version {}", 
-                table.get_file_uris().into_iter().count(), 
-                table.version());
-        }
-        Err(e) => println!("  ❌ PROJECT table: {}", e),
-    }
+    let tables_to_check = vec![
+        ("PROJECT", "silver/entities/projects"),
+        ("DEVELOPER", "silver/entities/developers"),
+        ("COMMIT", "silver/entities/commits"),
+        ("VERSION", "silver/entities/versions"),
+        ("ISSUE", "silver/entities/issues"),
+    ];
     
-    // Check DEVELOPER table
-    match deltalake::open_table(base_path.join("silver/entities/developers").to_str().unwrap()).await {
-        Ok(table) => {
-            println!("  ✅ DEVELOPER table: {} files, version {}", 
-                table.get_file_uris().into_iter().count(), 
-                table.version());
+    for (table_name, table_path) in tables_to_check {
+        match deltalake::open_table(base_path.join(table_path).to_str().unwrap()).await {
+            Ok(table) => {
+                println!("  ✅ {} table: {} files, version {}", 
+                    table_name,
+                    table.get_file_uris().into_iter().count(), 
+                    table.version());
+            }
+            Err(e) => println!("  ❌ {} table: {}", table_name, e),
         }
-        Err(e) => println!("  ❌ DEVELOPER table: {}", e),
     }
     
     Ok(())

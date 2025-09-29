@@ -2,7 +2,6 @@ use crate::errors::Result;
 use deltalake::arrow::array::*;
 use deltalake::arrow::datatypes::DataType;
 use std::sync::Arc;
-use serde::Serialize;
 
 /// 通用类型转换特性
 trait ToArrowArray {

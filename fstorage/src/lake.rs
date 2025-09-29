@@ -15,9 +15,15 @@ impl Lake {
         Ok(Self { config })
     }
 
-    /// 获取或创建Delta Table的实例
-    async fn get_or_create_table(&self, table_name: &str) -> Result<DeltaTable> {
+    // create delta table
+    pub async fn get_or_create_table(&self, table_name: &str) -> Result<DeltaTable> {
         let table_path = self.config.lake_path.join(table_name);
+        
+        // 确保父目录存在
+        if let Some(parent) = table_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        
         match deltalake::open_table(table_path.to_str().unwrap()).await {
             Ok(table) => Ok(table),
             Err(deltalake::DeltaTableError::NotATable(_)) => {
@@ -44,10 +50,10 @@ impl Lake {
             return Ok(());
         }
 
-        let table = self.get_or_create_table(table_name).await?;
-
+        let table_path = self.config.lake_path.join(table_name);
+        
         // Use DeltaOps for writing with merge support
-        let ops = deltalake::DeltaOps(table);
+        let ops = deltalake::DeltaOps::try_from_uri(table_path.to_str().unwrap()).await?;
         
         if let Some(_predicate) = merge_on {
             // Note: In deltalake 0.17.0, merge operations are handled differently
