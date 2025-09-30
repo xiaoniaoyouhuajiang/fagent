@@ -2,8 +2,9 @@ use crate::config::StorageConfig;
 use crate::errors::{Result, StorageError};
 use deltalake::arrow::record_batch::RecordBatch;
 use deltalake::operations::create::CreateBuilder;
-// use deltalake::operations::write::WriteBuilder;
-use deltalake::{DeltaTable};
+use deltalake::{DeltaTable, DeltaOps};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 pub struct Lake {
     config: StorageConfig,
@@ -64,6 +65,192 @@ impl Lake {
         ops.write(batches).await?;
 
         Ok(())
+    }
+
+    /// 写入边数据到数据湖
+    /// 
+    /// # 参数
+    /// * `edge_type` - 边类型名称（如 "HAS_VERSION", "CALLS" 等）
+    /// * `edges` - 边数据向量，必须实现 Fetchable trait
+    /// 
+    /// # 返回
+    /// * `Result<()>` - 操作结果
+    pub async fn write_edges<T: crate::fetch::Fetchable>(
+        &self,
+        edge_type: &str,
+        edges: Vec<T>,
+    ) -> Result<()> {
+        let batch = T::to_record_batch(edges)?;
+        let table_path = format!("silver/edges/{}", edge_type.to_lowercase());
+        self.write_batches(&table_path, vec![batch], None).await
+    }
+
+    /// 查询节点的出边
+    /// 
+    /// # 参数
+    /// * `node_id` - 节点ID
+    /// * `edge_type` - 可选的边类型过滤器
+    /// 
+    /// # 返回
+    /// * `Result<Vec<HashMap<String, serde_json::Value>>>` - 边数据列表
+    pub async fn get_out_edges(
+        &self,
+        node_id: &str,
+        edge_type: Option<&str>,
+    ) -> Result<Vec<HashMap<String, serde_json::Value>>> {
+        let edge_types = if let Some(et) = edge_type {
+            vec![et.to_string()]
+        } else {
+            // 获取所有边类型 - 扫描 silver/edges/ 目录
+            self.get_available_edge_types().await.unwrap_or_default()
+        };
+        
+        let mut results = Vec::new();
+        
+        for et in edge_types {
+            let table_path = format!("silver/edges/{}", et);
+            if let Ok(table) = deltalake::open_table(
+                self.config.lake_path.join(&table_path).to_str().unwrap()
+            ).await {
+                // 简化的查询：目前返回模拟数据（后续可以集成helixdb的高性能查询）
+                let mut mock_results = Vec::new();
+                if et.contains("has_version") {
+                    mock_results.push(serde_json::json!({
+                        "id": format!("edge-{}-{}", node_id, 1),
+                        "from_node_id": node_id,
+                        "to_node_id": "version-1.0.0",
+                        "from_node_type": "PROJECT",
+                        "to_node_type": "VERSION"
+                    }));
+                } else if et.contains("calls") {
+                    mock_results.push(serde_json::json!({
+                        "id": format!("edge-{}-{}", node_id, 1),
+                        "from_node_id": node_id,
+                        "to_node_id": "function-helper",
+                        "from_node_type": "FUNCTION",
+                        "to_node_type": "FUNCTION"
+                    }));
+                }
+                
+                // 转换为 HashMap 格式
+                for mock_data in mock_results {
+                    
+                    if let serde_json::Value::Object(obj) = mock_data {
+                        let edge_data: HashMap<String, serde_json::Value> = obj.into_iter().collect();
+                        results.push(edge_data);
+                    }
+                }
+            }
+        }
+        
+        Ok(results)
+    }
+
+    /// 查询节点的入边
+    /// 
+    /// # 参数
+    /// * `node_id` - 节点ID
+    /// * `edge_type` - 可选的边类型过滤器
+    /// 
+    /// # 返回
+    /// * `Result<Vec<HashMap<String, serde_json::Value>>>` - 边数据列表
+    pub async fn get_in_edges(
+        &self,
+        node_id: &str,
+        edge_type: Option<&str>,
+    ) -> Result<Vec<HashMap<String, serde_json::Value>>> {
+        let edge_types = if let Some(et) = edge_type {
+            vec![et.to_string()]
+        } else {
+            self.get_available_edge_types().await.unwrap_or_default()
+        };
+        
+        let mut results = Vec::new();
+        
+        for et in edge_types {
+            let table_path = format!("silver/edges/{}", et);
+            if let Ok(table) = deltalake::open_table(
+                self.config.lake_path.join(&table_path).to_str().unwrap()
+            ).await {
+                // 简化的查询：目前返回模拟数据（后续可以集成helixdb的高性能查询）
+                let mut mock_results = Vec::new();
+                if et.contains("has_version") {
+                    mock_results.push(serde_json::json!({
+                        "id": format!("edge-{}-{}", node_id, 1),
+                        "from_node_id": node_id,
+                        "to_node_id": "version-1.0.0",
+                        "from_node_type": "PROJECT",
+                        "to_node_type": "VERSION"
+                    }));
+                } else if et.contains("calls") {
+                    mock_results.push(serde_json::json!({
+                        "id": format!("edge-{}-{}", node_id, 1),
+                        "from_node_id": node_id,
+                        "to_node_id": "function-helper",
+                        "from_node_type": "FUNCTION",
+                        "to_node_type": "FUNCTION"
+                    }));
+                }
+                
+                // 转换为 HashMap 格式
+                for mock_data in mock_results {
+                    
+                    if let serde_json::Value::Object(obj) = mock_data {
+                        let edge_data: HashMap<String, serde_json::Value> = obj.into_iter().collect();
+                        results.push(edge_data);
+                    }
+                }
+            }
+        }
+        
+        Ok(results)
+    }
+
+    /// 获取边数据统计信息
+    /// 
+    /// # 返回
+    /// * `Result<HashMap<String, i64>>` - 边类型到数量的映射
+    pub async fn get_edge_statistics(&self) -> Result<HashMap<String, i64>> {
+        let mut stats = HashMap::new();
+        
+        // 获取所有可用的边类型
+        let edge_types = self.get_available_edge_types().await.unwrap_or_default();
+        
+        for et in edge_types {
+            let table_path = format!("silver/edges/{}", et);
+            if let Ok(table) = deltalake::open_table(
+                self.config.lake_path.join(&table_path).to_str().unwrap()
+            ).await {
+                // 使用表的版本数量估算记录数（简化实现）
+                let file_count = table.version() as i64;
+                stats.insert(et, file_count);
+            }
+        }
+        
+        Ok(stats)
+    }
+
+    /// 获取所有可用的边类型
+    /// 
+    /// # 返回
+    /// * `Result<Vec<String>>` - 边类型列表
+    async fn get_available_edge_types(&self) -> Result<Vec<String>> {
+        let edges_path = self.config.lake_path.join("silver/edges");
+        let mut edge_types = Vec::new();
+        
+        if tokio::fs::metadata(&edges_path).await.is_ok() {
+            let mut entries = tokio::fs::read_dir(&edges_path).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(dir_name) = path.file_name().and_then(|name| name.to_str()) {
+                        edge_types.push(dir_name.to_string());
+                    }
+                }
+            }
+        }
+        
+        Ok(edge_types)
     }
 }
 

@@ -20,6 +20,7 @@ pub enum StorageError {
     #[error("Arrow operation failed: {0}")]
     Arrow(#[from] deltalake::arrow::error::ArrowError),
 
+    
     #[error("Configuration error: {0}")]
     Config(String),
 

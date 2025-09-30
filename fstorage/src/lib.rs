@@ -85,6 +85,99 @@ impl FStorage {
             synchronizer,
         })
     }
+
+    /// 写入边数据到数据湖
+    /// 
+    /// # 参数
+    /// * `edge_type` - 边类型名称（如 "HAS_VERSION", "CALLS" 等）
+    /// * `edges` - 边数据向量，必须实现 Fetchable trait
+    /// 
+    /// # 返回
+    /// * `Result<()>` - 操作结果
+    /// 
+    /// # 示例
+    /// ```rust,no_run
+    /// use fstorage::{FStorage, schemas::HAS_VERSION};
+    /// use chrono::{DateTime, Utc};
+    /// 
+    /// let edges = vec![
+    ///     HAS_VERSION {
+    ///         id: Some("edge-1".to_string()),
+    ///         from_node_id: Some("project-1".to_string()),
+    ///         to_node_id: Some("version-1".to_string()),
+    ///         from_node_type: Some("PROJECT".to_string()),
+    ///         to_node_type: Some("VERSION".to_string()),
+    ///         created_at: Some(Utc::now()),
+    ///         updated_at: Some(Utc::now()),
+    ///     },
+    /// ];
+    /// 
+    /// storage.write_edges("HAS_VERSION", edges).await?;
+    /// ```
+    pub async fn write_edges<T: crate::fetch::Fetchable>(
+        &self,
+        edge_type: &str,
+        edges: Vec<T>,
+    ) -> Result<()> {
+        self.lake.write_edges(edge_type, edges).await
+    }
+
+    /// 批量写入多种类型的边数据
+    /// 
+    /// # 参数
+    /// * `edge_batches` - 边类型到边数据向量的映射
+    /// 
+    /// # 返回
+    /// * `Result<()>` - 操作结果
+    pub async fn write_multiple_edges<T: crate::fetch::Fetchable>(
+        &self,
+        edge_batches: std::collections::HashMap<&str, Vec<T>>,
+    ) -> Result<()> {
+        for (edge_type, edges) in edge_batches {
+            self.lake.write_edges(edge_type, edges).await?;
+        }
+        Ok(())
+    }
+
+    /// 查询节点的出边
+    /// 
+    /// # 参数
+    /// * `node_id` - 节点ID
+    /// * `edge_type` - 可选的边类型过滤器
+    /// 
+    /// # 返回
+    /// * `Result<Vec<std::collections::HashMap<String, serde_json::Value>>>` - 边数据列表
+    pub async fn get_out_edges(
+        &self,
+        node_id: &str,
+        edge_type: Option<&str>,
+    ) -> Result<Vec<std::collections::HashMap<String, serde_json::Value>>> {
+        self.lake.get_out_edges(node_id, edge_type).await
+    }
+
+    /// 查询节点的入边
+    /// 
+    /// # 参数
+    /// * `node_id` - 节点ID
+    /// * `edge_type` - 可选的边类型过滤器
+    /// 
+    /// # 返回
+    /// * `Result<Vec<std::collections::HashMap<String, serde_json::Value>>>` - 边数据列表
+    pub async fn get_in_edges(
+        &self,
+        node_id: &str,
+        edge_type: Option<&str>,
+    ) -> Result<Vec<std::collections::HashMap<String, serde_json::Value>>> {
+        self.lake.get_in_edges(node_id, edge_type).await
+    }
+
+    /// 获取边数据统计信息
+    /// 
+    /// # 返回
+    /// * `Result<std::collections::HashMap<String, i64>>` - 边类型到数量的映射
+    pub async fn get_edge_statistics(&self) -> Result<std::collections::HashMap<String, i64>> {
+        self.lake.get_edge_statistics().await
+    }
 }
 
 #[cfg(test)]
