@@ -1,50 +1,43 @@
 use crate::catalog::Catalog;
-use crate::errors::Result;
-use crate::fetch::{Fetchable, Fetcher};
+use crate::errors::{Result, StorageError};
+use crate::fetch::{FetchResponse, Fetcher, GraphData};
 use crate::lake::Lake;
-use crate::models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext};
+use crate::models::{EntityIdentifier, ReadinessReport, SyncContext, SyncBudget};
 use async_trait::async_trait;
+use helix_db::helix_engine::traversal_core::HelixGraphEngine;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Defines the core interface for dynamically synchronizing data.
-///
-/// This trait abstracts the logic for checking data freshness, performing
-/// budgeted data fetching from external sources, and running ETL processes
-/// to populate the graph engine.
 #[async_trait]
 pub trait DataSynchronizer {
+    /// Registers a concrete fetcher implementation with the synchronizer.
+    fn register_fetcher(&mut self, fetcher: Arc<dyn Fetcher>);
+
     /// Checks the readiness of one or more data entities.
-    ///
-    /// This method queries the metadata catalog to determine if the local data for
-    /// the given entities is considered "fresh" based on their TTLs.
     async fn check_readiness(
         &self,
         entities: &[EntityIdentifier],
     ) -> Result<HashMap<String, ReadinessReport>>;
 
-    /// Performs a budgeted data completion operation for a specific entity type.
-    async fn budgeted_complete<T: Fetchable>(
+    /// Performs a data synchronization operation using a named fetcher.
+    async fn sync(
         &self,
-        fetcher: Arc<dyn Fetcher<T>>,
+        fetcher_name: &str,
+        params: serde_json::Value,
         context: SyncContext,
         budget: SyncBudget,
-    ) -> Result<HashMap<String, ReadinessReport>>;
+    ) -> Result<()>;
 
     /// Runs a full ETL process from the data lake to the graph engine.
-    ///
-    /// This method is responsible for reading structured data from the silver layer
-    /// and loading it into the `HelixGraphEngine`, effectively rebuilding or updating
-    /// the queryable graph index.
     async fn run_full_etl_from_lake(&self, target_repo_uri: &str) -> Result<()>;
 }
-
-use helix_db::helix_engine::traversal_core::HelixGraphEngine;
 
 pub struct FStorageSynchronizer {
     catalog: Arc<Catalog>,
     lake: Arc<Lake>,
     engine: Arc<HelixGraphEngine>,
+    fetchers: HashMap<&'static str, Arc<dyn Fetcher>>,
 }
 
 impl FStorageSynchronizer {
@@ -57,12 +50,34 @@ impl FStorageSynchronizer {
             catalog,
             lake,
             engine,
+            fetchers: HashMap::new(),
         }
+    }
+
+    /// Processes the GraphData variant of a FetchResponse, writing entities to the lake.
+    async fn process_graph_data(&self, graph_data: GraphData) -> Result<()> {
+        for fetchable_collection in graph_data.into_inner() {
+            let entity_type = fetchable_collection.entity_type_any();
+            let record_batch = fetchable_collection.to_record_batch_any()?;
+            
+            // TODO: This table name logic should be more robust, maybe defined in the schema
+            let table_name = format!("entities/{}", entity_type.to_lowercase());
+            
+            // TODO: Primary keys should be retrieved to perform a merge operation
+            self.lake
+                .write_batches(&table_name, vec![record_batch], None)
+                .await?;
+        }
+        Ok(())
     }
 }
 
 #[async_trait]
 impl DataSynchronizer for FStorageSynchronizer {
+    fn register_fetcher(&mut self, fetcher: Arc<dyn Fetcher>) {
+        self.fetchers.insert(fetcher.name(), fetcher);
+    }
+
     async fn check_readiness(
         &self,
         entities: &[EntityIdentifier],
@@ -94,35 +109,42 @@ impl DataSynchronizer for FStorageSynchronizer {
         Ok(reports)
     }
 
-    async fn budgeted_complete<T: Fetchable>(
+    async fn sync(
         &self,
-        fetcher: Arc<dyn Fetcher<T>>,
+        fetcher_name: &str,
+        params: serde_json::Value,
         context: SyncContext,
         _budget: SyncBudget,
-    ) -> Result<HashMap<String, ReadinessReport>> {
-        let task_name = format!("budgeted_complete_for_{:?}", context.target_entities);
+    ) -> Result<()> {
+        let task_name = format!("sync_with_{}", fetcher_name);
         let task_id = self.catalog.create_task_log(&task_name)?;
 
-        for entity in &context.target_entities {
-            // 1. Fetch data from external source using the provided fetcher
-            let fetched_data: Vec<T> = fetcher.fetch(&entity.uri).await?;
+        // 1. Find and execute the appropriate fetcher
+        let fetcher = self.fetchers.get(fetcher_name).ok_or_else(|| {
+            StorageError::Config(format!("Fetcher '{}' not registered.", fetcher_name))
+        })?;
+        let response = fetcher.fetch(params).await?;
 
-            if fetched_data.is_empty() {
-                continue;
+        // 2. Process the response based on its type
+        match response {
+            FetchResponse::GraphData(graph_data) => {
+                self.process_graph_data(graph_data).await?;
             }
+            FetchResponse::TextForVectorization { node_uri, text, metadata } => {
+                // Placeholder: Logic to convert text to vector and store in HelixDB
+                log::info!("Received text for vectorization for node: {}", node_uri);
+                // self.engine.vector_core.insert(...)
+            }
+            FetchResponse::PanelData { table_name, batch } => {
+                // Placeholder: Logic to write panel data to a dedicated analytics table
+                log::info!("Received panel data for table: {}", table_name);
+                self.lake.write_batches(&table_name, vec![batch], None).await?;
+            }
+        }
 
-            // 2. Convert fetched data to a RecordBatch
-            let batch = T::to_record_batch(fetched_data.into_iter())?;
-
-            // 3. Write to the silver layer in Delta Lake format, using merge for idempotency
-            let table_name = T::table_name();
-            let primary_keys = T::primary_keys();
-            self.lake
-                .write_batches(&table_name, vec![batch], Some(primary_keys))
-                .await?;
-
-            // 4. Update catalog
-            let now = chrono::Utc::now().timestamp();
+        // 3. Update catalog for all affected entities
+        let now = chrono::Utc::now().timestamp();
+        for entity in &context.target_entities {
             let readiness = crate::models::EntityReadiness {
                 entity_uri: entity.uri.clone(),
                 entity_type: entity.entity_type.clone(),
@@ -133,14 +155,10 @@ impl DataSynchronizer for FStorageSynchronizer {
             self.catalog.upsert_readiness(&readiness)?;
         }
 
-        self.catalog.update_task_log_status(
-            task_id,
-            "SUCCESS",
-            "Completed successfully.",
-        )?;
+        self.catalog
+            .update_task_log_status(task_id, "SUCCESS", "Sync completed successfully.")?;
 
-        // Return the new readiness status
-        self.check_readiness(&context.target_entities).await
+        Ok(())
     }
 
     async fn run_full_etl_from_lake(&self, target_repo_uri: &str) -> Result<()> {
@@ -148,18 +166,7 @@ impl DataSynchronizer for FStorageSynchronizer {
         let task_id = self.catalog.create_task_log(&task_name)?;
 
         // --- This is where the actual ETL logic would go ---
-        // 1. Read from silver tables (e.g., entities/repos, edges/pr_changes_file)
-        //    let repos_data = self.read_silver_table("entities/repos").await?;
-
-        // 2. Read from dicts (placeholder)
-
-        // 3. Transform and load into Helix Engine
-        //    for row in repos_data.iter() {
-        //        let node = ...; // transform row to helix-db node
-        //        self.engine.add_node(node)?;
-        //    }
-
-        // For now, we just log success.
+        log::info!("Starting ETL from Lake to Engine for {}", target_repo_uri);
         // --- End of placeholder logic ---
 
         self.catalog.update_task_log_status(

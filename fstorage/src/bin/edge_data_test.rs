@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Write HAS_VERSION edges
     println!("📊 Writing HAS_VERSION edges...");
-    storage.write_edges("HAS_VERSION", has_version_edges).await?;
+    storage.lake.write_edges("HAS_VERSION", has_version_edges).await?;
     
     // Create CALLS edges
     let calls_edges = vec![
@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Write CALLS edges
     println!("🔗 Writing CALLS edges...");
-    storage.write_edges("CALLS", calls_edges).await?;
+    storage.lake.write_edges("CALLS", calls_edges).await?;
     
     // Test writing additional edges individually (since HashMap requires uniform types)
     println!("\n🔄 Testing additional edge data写入...");
@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     ];
     
-    storage.write_edges("HAS_VERSION", additional_has_version).await?;
+    storage.lake.write_edges("HAS_VERSION", additional_has_version).await?;
     
     // Add more CALLS edges
     let additional_calls = vec![
@@ -104,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     ];
     
-    storage.write_edges("CALLS", additional_calls).await?;
+    storage.lake.write_edges("CALLS", additional_calls).await?;
     
     // Check directory structure
     println!("\n📂 Final DataLake directory structure:");
@@ -113,14 +113,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test edge queries (placeholder implementation)
     println!("\n🔍 Testing edge queries...");
     
-    let out_edges = storage.get_out_edges("project-rust-lang-rust", Some("HAS_VERSION")).await?;
+    let out_edges = storage.lake.get_out_edges("project-rust-lang-rust", Some("HAS_VERSION")).await?;
     println!("📤 Out edges count: {}", out_edges.len());
     
-    let in_edges = storage.get_in_edges("version-v1.0.0", Some("HAS_VERSION")).await?;
+    let in_edges = storage.lake.get_in_edges("version-v1.0.0", Some("HAS_VERSION")).await?;
     println!("📥 In edges count: {}", in_edges.len());
     
     // Get edge statistics
-    let stats = storage.get_edge_statistics().await?;
+    let stats = storage.lake.get_edge_statistics().await?;
     println!("📊 Edge statistics: {:?}", stats);
     
     println!("\n🎯 Edge Data Storage Summary:");
