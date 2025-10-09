@@ -35,6 +35,7 @@ fn main() -> anyhow::Result<()> {
     writeln!(file, "use chrono::{{DateTime, Utc}};")?;
     writeln!(file, "use helix_db::utils::id::ID;")?;
     writeln!(file, "use crate::fetch::Fetchable;")?;
+    writeln!(file, "use crate::fetch::EntityCategory;")?;
     writeln!(file, "use std::sync::Arc;")?;
     writeln!(file, "")?;
 
@@ -117,6 +118,11 @@ fn generate_edge_fetchable_impl(
     // Generate primary_keys method - use id field
     writeln!(file, "    fn primary_keys() -> Vec<&'static str> {{")?;
     writeln!(file, "        vec![\"id\"]")?;
+    writeln!(file, "    }}")?;
+    writeln!(file, "")?;
+
+    writeln!(file, "    fn category() -> EntityCategory {{")?;
+    writeln!(file, "        EntityCategory::Edge")?;
     writeln!(file, "    }}")?;
     writeln!(file, "")?;
     
@@ -229,7 +235,7 @@ fn generate_fetchable_impl(file: &mut File, struct_name: &str, fields: &[helix_d
     writeln!(file, "    const ENTITY_TYPE: &'static str = \"{}\";", struct_name.to_lowercase())?;
     writeln!(file, "")?;
     
-    // 生成 primary_keys 方法
+    // Generate primary_keys method
     writeln!(file, "    fn primary_keys() -> Vec<&'static str> {{")?;
     let index_fields: Vec<&String> = fields.iter()
         .filter(|f| f.is_indexed())
@@ -237,7 +243,7 @@ fn generate_fetchable_impl(file: &mut File, struct_name: &str, fields: &[helix_d
         .collect();
     
     if index_fields.is_empty() {
-        // 如果没有 INDEX 字段，使用第一个字段
+        // If no INDEX field, use the first field
         if let Some(first_field) = fields.first() {
             writeln!(file, "        vec![\"{}\"]", first_field.name)?;
         } else {
@@ -251,7 +257,12 @@ fn generate_fetchable_impl(file: &mut File, struct_name: &str, fields: &[helix_d
     }
     writeln!(file, "    }}")?;
     writeln!(file, "")?;
-    
+
+    writeln!(file, "    fn category() -> EntityCategory {{")?;
+    writeln!(file, "        EntityCategory::Node")?;
+    writeln!(file, "    }}")?;
+    writeln!(file, "")?;
+        
     // 生成 to_record_batch 方法
     writeln!(file, "    fn to_record_batch(data: impl IntoIterator<Item = Self>) -> crate::errors::Result<deltalake::arrow::record_batch::RecordBatch> {{")?;
     writeln!(file, "        let data: Vec<Self> = data.into_iter().collect();")?;

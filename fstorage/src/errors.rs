@@ -36,8 +36,12 @@ pub enum StorageError {
     #[error("Synchronization failed: {0}")]
     SyncError(String),
 
+    #[error("Heed operation failed: {0}")]
+    Heed(#[from] heed3::Error),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
+
 
 pub type Result<T> = std::result::Result<T, StorageError>;
