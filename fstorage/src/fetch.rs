@@ -50,7 +50,6 @@ pub struct TextToVectorize {
 #[derive(Default)]
 pub struct GraphData {
     pub entities: Vec<Box<dyn AnyFetchable>>,
-    pub texts_for_vectorization: Vec<TextToVectorize>,
 }
 
 impl GraphData {
@@ -77,9 +76,12 @@ pub enum FetchResponse {
     },
 }
 
+use crate::embedding::EmbeddingProvider;
+use std::sync::Arc;
+
 /// The evolved Fetcher trait, capable of returning a unified graph update package.
 #[async_trait]
 pub trait Fetcher: Send + Sync {
     fn name(&self) -> &'static str;
-    async fn fetch(&self, params: serde_json::Value) -> Result<FetchResponse>;
+    async fn fetch(&self, params: serde_json::Value, embedding_provider: Arc<dyn EmbeddingProvider>) -> Result<FetchResponse>;
 }

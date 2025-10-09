@@ -1,4 +1,4 @@
-use fstorage::{FStorage, config::StorageConfig, schemas::{PROJECT, DEVELOPER, COMMIT, VERSION, ISSUE}, fetch::Fetchable};
+use fstorage::{FStorage, config::StorageConfig, schemas::generated_schemas::{Project, Developer, Commit, Version, Issue}, fetch::Fetchable};
 use tempfile::tempdir;
 use chrono::{DateTime, Utc};
 
@@ -25,103 +25,96 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test creating Delta tables for each schema entity type
     println!("\n🚀 Creating schema-based Delta tables...");
     
-    // Create PROJECT entities using generated schema struct
     let sample_projects = vec![
-        PROJECT {
-            url: Some("https://github.com/rust-lang/rust".to_string()),
-            name: Some("Rust".to_string()),
-            description: Some("The Rust Programming Language".to_string()),
+        Project {
+            url: Some("https://github.com/example/repo1".to_string()),
+            name: Some("repo1".to_string()),
+            description: Some("Description for repo1".to_string()),
             language: Some("Rust".to_string()),
-            stars: Some(91000),
-            forks: Some(19000),
+            stars: Some(100),
+            forks: Some(20),
         },
-        PROJECT {
-            url: Some("https://github.com/tokio-rs/tokio".to_string()),
-            name: Some("Tokio".to_string()),
-            description: Some("A runtime for writing reliable network applications".to_string()),
-            language: Some("Rust".to_string()),
-            stars: Some(23000),
-            forks: Some(3500),
+        Project {
+            url: Some("https://github.com/example/repo2".to_string()),
+            name: Some("repo2".to_string()),
+            description: Some("Description for repo2".to_string()),
+            language: Some("Python".to_string()),
+            stars: Some(200),
+            forks: Some(40),
         },
     ];
-    
-    // Convert PROJECT entities to RecordBatch using generated Fetchable implementation
-    let projects_batch = PROJECT::to_record_batch(sample_projects.clone())?;
-    
-    // Write PROJECT entities to silver layer
-    println!("📊 Writing PROJECT entities to silver layer...");
-    storage.lake.write_batches("silver/entities/projects", vec![projects_batch], None).await?;
-    
-    // Create DEVELOPER entities using generated schema struct
+
+    let projects_batch = Project::to_record_batch(sample_projects.clone())?;
+    storage
+        .lake
+        .write_batches(&Project::table_name(), vec![projects_batch], None)
+        .await?;
+
     let sample_developers = vec![
-        DEVELOPER {
-            name: Some("alice".to_string()),
-            followers: Some(120),
-            location: Some("San Francisco".to_string()),
-            email: Some("alice@example.com".to_string()),
+        Developer {
+            name: Some("user1".to_string()),
+            followers: Some(1000),
+            location: Some("Location A".to_string()),
+            email: Some("user1@example.com".to_string()),
         },
-        DEVELOPER {
-            name: Some("bob".to_string()),
-            followers: Some(85),
-            location: Some("New York".to_string()),
-            email: Some("bob@example.com".to_string()),
+        Developer {
+            name: Some("user2".to_string()),
+            followers: Some(2000),
+            location: Some("Location B".to_string()),
+            email: Some("user2@example.com".to_string()),
         },
     ];
-    
-    // Convert DEVELOPER entities to RecordBatch using generated Fetchable implementation
-    let developers_batch = DEVELOPER::to_record_batch(sample_developers.clone())?;
-    
-    println!("👤 Writing DEVELOPER entities to silver layer...");
-    storage.lake.write_batches("silver/entities/developers", vec![developers_batch], None).await?;
-    
-    // Test additional entity types
-    println!("\n🚀 Testing additional entity types...");
-    
-    // Test COMMIT entities
+    let developers_batch = Developer::to_record_batch(sample_developers.clone())?;
+    storage
+        .lake
+        .write_batches(&Developer::table_name(), vec![developers_batch], None)
+        .await?;
+
     let sample_commits = vec![
-        COMMIT {
-            sha: Some("abc123".to_string()),
+        Commit {
+            sha: Some("a1b2c3d4".to_string()),
             message: Some("Initial commit".to_string()),
-            committed_at: Some(DateTime::from_timestamp(1640995200, 0).unwrap()), // 2022-01-01
+            committed_at: Some(Utc::now()),
         },
-        COMMIT {
-            sha: Some("def456".to_string()),
-            message: Some("Add feature".to_string()),
-            committed_at: Some(DateTime::from_timestamp(1641081600, 0).unwrap()), // 2022-01-02
+        Commit {
+            sha: Some("e5f6g7h8".to_string()),
+            message: Some("Add feature X".to_string()),
+            committed_at: Some(Utc::now()),
         },
     ];
-    
-    let commits_batch = COMMIT::to_record_batch(sample_commits)?;
-    println!("📝 Writing COMMIT entities to silver layer...");
-    storage.lake.write_batches("silver/entities/commits", vec![commits_batch], None).await?;
-    
-    // Test VERSION entities
+    let commits_batch = Commit::to_record_batch(sample_commits)?;
+    storage
+        .lake
+        .write_batches(&Commit::table_name(), vec![commits_batch], None)
+        .await?;
+
     let sample_versions = vec![
-        VERSION {
-            sha: Some("v1.0.0".to_string()),
-            tag: Some("1.0.0".to_string()),
+        Version {
+            sha: Some("a1b2c3d4".to_string()),
+            tag: Some("v1.0.0".to_string()),
             is_head: Some(false),
-            created_at: Some(DateTime::from_timestamp(1640995200, 0).unwrap()),
+            created_at: Some(Utc::now()),
         },
     ];
-    
-    let versions_batch = VERSION::to_record_batch(sample_versions)?;
-    println!("🏷️  Writing VERSION entities to silver layer...");
-    storage.lake.write_batches("silver/entities/versions", vec![versions_batch], None).await?;
-    
-    // Test ISSUE entities
+    let versions_batch = Version::to_record_batch(sample_versions)?;
+    storage
+        .lake
+        .write_batches(&Version::table_name(), vec![versions_batch], None)
+        .await?;
+
     let sample_issues = vec![
-        ISSUE {
-            number: Some(42),
-            title: Some("Bug in login".to_string()),
+        Issue {
+            number: Some(1),
+            title: Some("Bug in feature Y".to_string()),
             state: Some("open".to_string()),
-            created_at: Some(DateTime::from_timestamp(1640995200, 0).unwrap()),
+            created_at: Some(Utc::now()),
         },
     ];
-    
-    let issues_batch = ISSUE::to_record_batch(sample_issues)?;
-    println!("🐛 Writing ISSUE entities to silver layer...");
-    storage.lake.write_batches("silver/entities/issues", vec![issues_batch], None).await?;
+    let issues_batch = Issue::to_record_batch(sample_issues)?;
+    storage
+        .lake
+        .write_batches(&Issue::table_name(), vec![issues_batch], None)
+        .await?;
     
     // Check final directory structure
     println!("\n📂 Final DataLake directory structure:");

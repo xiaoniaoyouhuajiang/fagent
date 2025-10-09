@@ -4,7 +4,7 @@ use deltalake::arrow::datatypes::DataType;
 use std::sync::Arc;
 
 /// 通用类型转换特性
-trait ToArrowArray {
+pub(crate) trait ToArrowArray {
     fn to_arrow_array(values: Vec<Option<Self>>) -> Arc<dyn Array>
     where
         Self: Sized;

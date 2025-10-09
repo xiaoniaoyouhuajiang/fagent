@@ -54,11 +54,14 @@ pub trait DataSynchronizer {
     async fn run_full_etl_from_lake(&self, target_repo_uri: &str) -> Result<()>;
 }
 
+use crate::embedding::EmbeddingProvider;
+
 pub struct FStorageSynchronizer {
     catalog: Arc<Catalog>,
     lake: Arc<Lake>,
     engine: Arc<HelixGraphEngine>,
     fetchers: HashMap<&'static str, Arc<dyn Fetcher>>,
+    embedding_provider: Arc<dyn EmbeddingProvider>,
 }
 
 impl FStorageSynchronizer {
@@ -66,12 +69,14 @@ impl FStorageSynchronizer {
         catalog: Arc<Catalog>,
         lake: Arc<Lake>,
         engine: Arc<HelixGraphEngine>,
+        embedding_provider: Arc<dyn EmbeddingProvider>,
     ) -> Self {
         Self {
             catalog,
             lake,
             engine,
             fetchers: HashMap::new(),
+            embedding_provider,
         }
     }
 
@@ -301,43 +306,23 @@ impl FStorageSynchronizer {
         Ok(())
     }
 
-    /// COLD & HOT PATH: Processes text for vectorization.
-    async fn process_text_for_vectorization(
-        &self,
-        node_uri: String,
-        _text: String,
-        _metadata: serde_json::Value,
-    ) -> Result<()> {
-        // --- COLD PATH ---
-        log::info!("Cold Path: Logging vectorization event for node {}", &node_uri);
-        // --- HOT PATH ---
-        log::info!("Hot Path: Vectorizing and indexing text for node {}", &node_uri);
-        Ok(())
-    }
-
     /// COLD & HOT PATH: Processes a unified GraphData object.
     async fn process_graph_data(&self, graph_data: GraphData) -> Result<()> {
-        // Destructure the GraphData object to take ownership of both fields.
-        let GraphData {
-            entities,
-            texts_for_vectorization,
-        } = graph_data;
-
-        // --- STAGE 1: Process all entities (nodes and edges) ---
-        for fetchable_collection in entities {
+        // --- STAGE 2: Persistence - Process all entities (original and newly created) ---
+        for fetchable_collection in graph_data.entities {
             let record_batch = fetchable_collection.to_record_batch_any()?;
             let entity_type = fetchable_collection.entity_type_any();
+            
+            // Cold Path: Write to Data Lake
             let table_name = format!("entities/{}", entity_type.to_lowercase());
             self.lake
                 .write_batches(&table_name, vec![record_batch.clone()], None)
                 .await?;
+
+            // Hot Path: Write to Graph Engine
             self.update_engine_from_batch(fetchable_collection, &record_batch)?;
         }
 
-        for task in texts_for_vectorization {
-            self.process_text_for_vectorization(task.node_uri, task.text, task.metadata)
-                .await?;
-        }
         Ok(())
     }
 }
@@ -392,7 +377,9 @@ impl DataSynchronizer for FStorageSynchronizer {
         let fetcher = self.fetchers.get(fetcher_name).ok_or_else(|| {
             StorageError::Config(format!("Fetcher '{}' not registered.", fetcher_name))
         })?;
-        let response = fetcher.fetch(params).await?;
+        
+        // The fetcher is now responsible for all transformation, including vectorization.
+        let response = fetcher.fetch(params, self.embedding_provider.clone()).await?;
 
         match response {
             FetchResponse::GraphData(graph_data) => {

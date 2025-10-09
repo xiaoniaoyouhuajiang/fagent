@@ -1,3 +1,4 @@
+use heck::ToUpperCamelCase;
 use helix_db::helixc::parser::{
     self,
     types::{FieldType, HxFile},
@@ -41,7 +42,7 @@ fn main() -> anyhow::Result<()> {
 
     if let Some(latest_schema) = ast.get_schemas_in_order().last() {
         for node_schema in &latest_schema.node_schemas {
-            let struct_name = &node_schema.name.1;
+            let struct_name = &node_schema.name.1.to_upper_camel_case();
             writeln!(
                 file,
                 "#[derive(Debug, Serialize, Deserialize, Clone)]"
@@ -71,7 +72,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn generate_edge_struct(file: &mut File, edge_schema: &helix_db::helixc::parser::types::EdgeSchema) -> anyhow::Result<()> {
-    let edge_name = &edge_schema.name.1;
+    let edge_name = &edge_schema.name.1.to_upper_camel_case();
     let from_type = &edge_schema.from.1;
     let to_type = &edge_schema.to.1;
     

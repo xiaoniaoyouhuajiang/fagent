@@ -1,6 +1,7 @@
 pub mod auto_fetchable;
 pub mod catalog;
 pub mod config;
+pub mod embedding;
 pub mod errors;
 pub mod fetch;
 pub mod lake;
@@ -13,9 +14,11 @@ use crate::config::StorageConfig;
 use crate::errors::Result;
 use crate::fetch::Fetcher;
 use crate::lake::Lake;
+use crate::errors::StorageError;
 use crate::sync::{DataSynchronizer, FStorageSynchronizer};
 use helix_db::helix_engine::traversal_core::{HelixGraphEngine, HelixGraphEngineOpts};
 use std::sync::{Arc, Mutex};
+use crate::embedding::{EmbeddingProvider, OpenAIProvider};
 
 /// The main entry point for the `fstorage` library.
 ///
@@ -31,6 +34,9 @@ pub struct FStorage {
 impl FStorage {
     /// Creates a new instance of FStorage and initializes it.
     pub async fn new(config: StorageConfig) -> Result<Self> {
+        // Load environment variables
+        dotenvy::dotenv().ok();
+
         // Ensure engine directory exists
         tokio::fs::create_dir_all(&config.engine_path).await?;
 
@@ -45,10 +51,18 @@ impl FStorage {
         };
         let engine = Arc::new(HelixGraphEngine::new(engine_opts)?);
 
+        // Initialize the embedding provider
+        let embedding_model = engine.storage.storage_config.embedding_model.clone().unwrap_or_else(|| "text-embedding-ada-002".to_string());
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .map_err(|_| StorageError::Config("OPENAI_API_KEY not found in environment".to_string()))?;
+        let embedding_provider = Arc::new(OpenAIProvider::new(embedding_model, api_key));
+
+
         let synchronizer = Arc::new(Mutex::new(FStorageSynchronizer::new(
             Arc::clone(&catalog),
             Arc::clone(&lake),
             Arc::clone(&engine),
+            embedding_provider.clone(),
         )));
 
         Ok(Self {
