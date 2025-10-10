@@ -1,10 +1,9 @@
 use crate::config::StorageConfig;
 use crate::errors::{Result, StorageError};
 use deltalake::arrow::record_batch::RecordBatch;
-use deltalake::operations::create::CreateBuilder;
-use deltalake::{DeltaTable, DeltaOps};
+use deltalake::DeltaTable;
+use deltalake::DeltaTableBuilder;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 pub struct Lake {
     config: StorageConfig,
@@ -25,15 +24,16 @@ impl Lake {
             tokio::fs::create_dir_all(parent).await?;
         }
         
-        match deltalake::open_table(table_path.to_str().unwrap()).await {
+        let table_uri = table_path
+            .to_str()
+            .ok_or_else(|| StorageError::Config(format!("Invalid table path {:?}", table_path)))?;
+
+        match deltalake::open_table(table_uri).await {
             Ok(table) => Ok(table),
             Err(deltalake::DeltaTableError::NotATable(_)) => {
-                // 如果表不存在，则根据一个空的RecordBatch创建它
-                // 这里的Schema是临时的，实际Schema将在第一次写入时确定
-                let table = CreateBuilder::new()
-                    .with_location(table_path.to_str().unwrap())
-                    .with_table_name(table_name)
-                    .await?;
+                // 如果表尚未初始化，返回一个尚未加载的 DeltaTable 句柄，
+                // 后续写入操作会在第一次写入时创建表并注入 Schema。
+                let table = DeltaTableBuilder::from_uri(table_uri).build()?;
                 Ok(table)
             }
             Err(e) => Err(StorageError::from(e)),
@@ -85,125 +85,24 @@ impl Lake {
         self.write_batches(&table_path, vec![batch], None).await
     }
 
-    /// 查询节点的出边
-    /// 
-    /// # 参数
-    /// * `node_id` - 节点ID
-    /// * `edge_type` - 可选的边类型过滤器
-    /// 
-    /// # 返回
-    /// * `Result<Vec<HashMap<String, serde_json::Value>>>` - 边数据列表
+    // Note: These methods are left for API compatibility but should ideally query the hot path (HelixDB).
+    // The current implementation is a placeholder.
     pub async fn get_out_edges(
         &self,
-        node_id: &str,
-        edge_type: Option<&str>,
+        _node_id: &str,
+        _edge_type: Option<&str>,
     ) -> Result<Vec<HashMap<String, serde_json::Value>>> {
-        let edge_types = if let Some(et) = edge_type {
-            vec![et.to_string()]
-        } else {
-            // 获取所有边类型 - 扫描 silver/edges/ 目录
-            self.get_available_edge_types().await.unwrap_or_default()
-        };
-        
-        let mut results = Vec::new();
-        
-        for et in edge_types {
-            let table_path = format!("silver/edges/{}", et);
-            if let Ok(table) = deltalake::open_table(
-                self.config.lake_path.join(&table_path).to_str().unwrap()
-            ).await {
-                // 简化的查询：目前返回模拟数据（后续可以集成helixdb的高性能查询）
-                let mut mock_results = Vec::new();
-                if et.contains("has_version") {
-                    mock_results.push(serde_json::json!({
-                        "id": format!("edge-{}-{}", node_id, 1),
-                        "from_node_id": node_id,
-                        "to_node_id": "version-1.0.0",
-                        "from_node_type": "PROJECT",
-                        "to_node_type": "VERSION"
-                    }));
-                } else if et.contains("calls") {
-                    mock_results.push(serde_json::json!({
-                        "id": format!("edge-{}-{}", node_id, 1),
-                        "from_node_id": node_id,
-                        "to_node_id": "function-helper",
-                        "from_node_type": "FUNCTION",
-                        "to_node_type": "FUNCTION"
-                    }));
-                }
-                
-                // 转换为 HashMap 格式
-                for mock_data in mock_results {
-                    
-                    if let serde_json::Value::Object(obj) = mock_data {
-                        let edge_data: HashMap<String, serde_json::Value> = obj.into_iter().collect();
-                        results.push(edge_data);
-                    }
-                }
-            }
-        }
-        
-        Ok(results)
+        log::warn!("get_out_edges is using mock data. For real data, query the graph engine.");
+        Ok(vec![])
     }
 
-    /// 查询节点的入边
-    /// 
-    /// # 参数
-    /// * `node_id` - 节点ID
-    /// * `edge_type` - 可选的边类型过滤器
-    /// 
-    /// # 返回
-    /// * `Result<Vec<HashMap<String, serde_json::Value>>>` - 边数据列表
     pub async fn get_in_edges(
         &self,
-        node_id: &str,
-        edge_type: Option<&str>,
+        _node_id: &str,
+        _edge_type: Option<&str>,
     ) -> Result<Vec<HashMap<String, serde_json::Value>>> {
-        let edge_types = if let Some(et) = edge_type {
-            vec![et.to_string()]
-        } else {
-            self.get_available_edge_types().await.unwrap_or_default()
-        };
-        
-        let mut results = Vec::new();
-        
-        for et in edge_types {
-            let table_path = format!("silver/edges/{}", et);
-            if let Ok(table) = deltalake::open_table(
-                self.config.lake_path.join(&table_path).to_str().unwrap()
-            ).await {
-                // 简化的查询：目前返回模拟数据（后续可以集成helixdb的高性能查询）
-                let mut mock_results = Vec::new();
-                if et.contains("has_version") {
-                    mock_results.push(serde_json::json!({
-                        "id": format!("edge-{}-{}", node_id, 1),
-                        "from_node_id": node_id,
-                        "to_node_id": "version-1.0.0",
-                        "from_node_type": "PROJECT",
-                        "to_node_type": "VERSION"
-                    }));
-                } else if et.contains("calls") {
-                    mock_results.push(serde_json::json!({
-                        "id": format!("edge-{}-{}", node_id, 1),
-                        "from_node_id": node_id,
-                        "to_node_id": "function-helper",
-                        "from_node_type": "FUNCTION",
-                        "to_node_type": "FUNCTION"
-                    }));
-                }
-                
-                // 转换为 HashMap 格式
-                for mock_data in mock_results {
-                    
-                    if let serde_json::Value::Object(obj) = mock_data {
-                        let edge_data: HashMap<String, serde_json::Value> = obj.into_iter().collect();
-                        results.push(edge_data);
-                    }
-                }
-            }
-        }
-        
-        Ok(results)
+        log::warn!("get_in_edges is using mock data. For real data, query the graph engine.");
+        Ok(vec![])
     }
 
     /// 获取边数据统计信息

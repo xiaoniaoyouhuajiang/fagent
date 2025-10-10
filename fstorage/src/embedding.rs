@@ -7,6 +7,15 @@ pub trait EmbeddingProvider: Send + Sync {
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f64>>>;
 }
 
+pub struct NullEmbeddingProvider;
+
+#[async_trait]
+impl EmbeddingProvider for NullEmbeddingProvider {
+    async fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f64>>> {
+        Ok(vec![vec![]; texts.len()])
+    }
+}
+
 #[derive(Serialize)]
 struct OpenAIRequest {
     input: Vec<String>,

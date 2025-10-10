@@ -8,17 +8,17 @@ pub mod lake;
 pub mod models;
 pub mod schemas;
 pub mod sync;
+pub mod utils;
 
 use crate::catalog::Catalog;
 use crate::config::StorageConfig;
 use crate::errors::Result;
 use crate::fetch::Fetcher;
 use crate::lake::Lake;
-use crate::errors::StorageError;
 use crate::sync::{DataSynchronizer, FStorageSynchronizer};
 use helix_db::helix_engine::traversal_core::{HelixGraphEngine, HelixGraphEngineOpts};
 use std::sync::{Arc, Mutex};
-use crate::embedding::{EmbeddingProvider, OpenAIProvider};
+use crate::embedding::{EmbeddingProvider, OpenAIProvider, NullEmbeddingProvider};
 
 /// The main entry point for the `fstorage` library.
 ///
@@ -53,9 +53,13 @@ impl FStorage {
 
         // Initialize the embedding provider
         let embedding_model = engine.storage.storage_config.embedding_model.clone().unwrap_or_else(|| "text-embedding-ada-002".to_string());
-        let api_key = std::env::var("OPENAI_API_KEY")
-            .map_err(|_| StorageError::Config("OPENAI_API_KEY not found in environment".to_string()))?;
-        let embedding_provider = Arc::new(OpenAIProvider::new(embedding_model, api_key));
+        let embedding_provider: Arc<dyn EmbeddingProvider> = match std::env::var("OPENAI_API_KEY") {
+            Ok(key) => Arc::new(OpenAIProvider::new(embedding_model, key)),
+            Err(_) => {
+                log::warn!("OPENAI_API_KEY not found, using NullEmbeddingProvider. Vector embeddings will be empty.");
+                Arc::new(NullEmbeddingProvider)
+            }
+        };
 
 
         let synchronizer = Arc::new(Mutex::new(FStorageSynchronizer::new(

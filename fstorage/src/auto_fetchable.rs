@@ -4,7 +4,7 @@ use deltalake::arrow::datatypes::DataType;
 use std::sync::Arc;
 
 /// 通用类型转换特性
-pub(crate) trait ToArrowArray {
+pub trait ToArrowArray {
     fn to_arrow_array(values: Vec<Option<Self>>) -> Arc<dyn Array>
     where
         Self: Sized;
@@ -53,85 +53,6 @@ impl ToArrowArray for helix_db::utils::id::ID {
             .collect();
         Arc::new(StringArray::from(strings))
     }
-}
-
-/// 将 HelixQL 类型映射到 Arrow 数据类型
-fn map_helixql_type_to_arrow(field_type: &str) -> DataType {
-    match field_type {
-        "String" => DataType::Utf8,
-        "Option<String>" => DataType::Utf8,
-        "I64" | "Option<I64>" => DataType::Int64,
-        "I32" | "Option<I32>" => DataType::Int32,
-        "I16" | "Option<I16>" => DataType::Int16,
-        "I8" | "Option<I8>" => DataType::Int8,
-        "U64" | "Option<U64>" => DataType::UInt64,
-        "U32" | "Option<U32>" => DataType::UInt32,
-        "U16" | "Option<U16>" => DataType::UInt16,
-        "U8" | "Option<U8>" => DataType::UInt8,
-        "F64" | "Option<F64>" => DataType::Float64,
-        "F32" | "Option<F32>" => DataType::Float32,
-        "Boolean" | "Option<Boolean>" => DataType::Boolean,
-        "DateTime<Utc>" | "Option<DateTime<Utc>>" => {
-            DataType::Timestamp(deltalake::arrow::datatypes::TimeUnit::Microsecond, Some("UTC".into()))
-        }
-        "ID" | "Option<ID>" => DataType::Utf8,
-        // 对于复杂类型，使用 JSON 字符串
-        _ => DataType::Utf8,
-    }
-}
-
-/// 检查类型是否可空
-fn is_nullable_type(field_type: &str) -> bool {
-    field_type.starts_with("Option<")
-}
-
-/// 提取基础类型名称
-fn extract_base_type(field_type: &str) -> &str {
-    if let Some(start) = field_type.find('<') {
-        if let Some(end) = field_type.rfind('>') {
-            return &field_type[start + 1..end];
-        }
-    }
-    field_type
-}
-
-/// 宏：自动为结构体生成 Fetchable 实现
-macro_rules! impl_fetchable_for_struct {
-    ($struct_name:ident, $entity_type:literal, $($field_name:ident: $field_type:ty),* $(,)?) => {
-        impl Fetchable for $struct_name {
-            const ENTITY_TYPE: &'static str = $entity_type;
-
-            fn primary_keys() -> Vec<&'static str> {
-                // 第一个 INDEX 字段作为主键
-                vec![$(stringify!($field_name)),*].first().map(|s| vec![*s]).unwrap_or_default()
-            }
-
-            fn to_record_batch(data: impl IntoIterator<Item = Self>) -> Result<RecordBatch> {
-                let data: Vec<$struct_name> = data.into_iter().collect();
-                
-                // 收集所有字段的数据
-                let mut arrays = Vec::new();
-                let mut fields = Vec::new();
-                
-                $(
-                    let field_values: Vec<Option<$field_type>> = data.iter()
-                        .map(|item| item.$field_name.clone())
-                        .collect();
-                    
-                    let arrow_type = map_helixql_type_to_arrow(stringify!($field_type));
-                    let is_nullable = is_nullable_type(stringify!($field_type));
-                    
-                    fields.push(Field::new(stringify!($field_name), arrow_type, is_nullable));
-                    arrays.push(ToArrowArray::to_arrow_array(field_values));
-                )*
-
-                let schema = Schema::new(fields);
-                
-                RecordBatch::try_new(Arc::new(schema), arrays)
-                    .map_err(|e| crate::errors::StorageError::Arrow(e.into()))
-            }
-        }
-    };
 }
 
 // 通用类型转换函数

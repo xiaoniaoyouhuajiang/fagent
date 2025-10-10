@@ -90,9 +90,8 @@ fn generate_edge_struct(file: &mut File, edge_schema: &helix_db::helixc::parser:
     // Add edge-specific properties if any
     if let Some(properties) = &edge_schema.properties {
         for field in properties {
-            let field_name = &field.name;
             let field_type = map_type_to_rust(&field.field_type);
-            writeln!(file, "    pub {}: {},", field_name, field_type)?;
+            writeln!(file, "    pub {}: {},", field.name, field_type)?;
         }
     }
     
@@ -108,8 +107,8 @@ fn generate_edge_struct(file: &mut File, edge_schema: &helix_db::helixc::parser:
 fn generate_edge_fetchable_impl(
     file: &mut File, 
     edge_name: &str, 
-    from_type: &str, 
-    to_type: &str,
+    _from_type: &str, 
+    _to_type: &str,
     properties: &Option<Vec<helix_db::helixc::parser::types::Field>>
 ) -> anyhow::Result<()> {
     writeln!(file, "impl Fetchable for {} {{", edge_name)?;
@@ -214,8 +213,7 @@ fn generate_edge_fetchable_impl(
     if let Some(properties) = properties {
         for field in properties {
             let arrow_type = map_to_arrow_type(&field.field_type);
-            let nullable = !matches!(field.field_type, FieldType::String | FieldType::I64 | FieldType::I32 | FieldType::I16 | FieldType::I8 | FieldType::U64 | FieldType::U32 | FieldType::U16 | FieldType::U8 | FieldType::F64 | FieldType::F32 | FieldType::Boolean);
-            writeln!(file, "            Field::new(\"{}\", {}, {}),", field.name, arrow_type, nullable)?;
+            writeln!(file, "            Field::new(\"{}\", {}, true),", field.name, arrow_type)?;
         }
     }
     
@@ -273,8 +271,7 @@ fn generate_fetchable_impl(file: &mut File, struct_name: &str, fields: &[helix_d
     writeln!(file, "            let schema = Schema::new(vec![")?;
     for field in fields {
         let arrow_type = map_to_arrow_type(&field.field_type);
-        let nullable = !matches!(field.field_type, FieldType::String | FieldType::I64 | FieldType::I32 | FieldType::I16 | FieldType::I8 | FieldType::U64 | FieldType::U32 | FieldType::U16 | FieldType::U8 | FieldType::F64 | FieldType::F32 | FieldType::Boolean);
-        writeln!(file, "                Field::new(\"{0}\", {1}, {2}),", field.name, arrow_type, nullable)?;
+        writeln!(file, "                Field::new(\"{0}\", {1}, true),", field.name, arrow_type)?;
     }
     writeln!(file, "            ]);")?;
     writeln!(file, "            return Ok(deltalake::arrow::record_batch::RecordBatch::new_empty(Arc::new(schema)));")?;
@@ -304,8 +301,7 @@ fn generate_fetchable_impl(file: &mut File, struct_name: &str, fields: &[helix_d
     writeln!(file, "        let schema = Schema::new(vec![")?;
     for field in fields {
         let arrow_type = map_to_arrow_type(&field.field_type);
-        let nullable = !matches!(field.field_type, FieldType::String | FieldType::I64 | FieldType::I32 | FieldType::I16 | FieldType::I8 | FieldType::U64 | FieldType::U32 | FieldType::U16 | FieldType::U8 | FieldType::F64 | FieldType::F32 | FieldType::Boolean);
-        writeln!(file, "            Field::new(\"{0}\", {1}, {2}),", field.name, arrow_type, nullable)?;
+        writeln!(file, "            Field::new(\"{0}\", {1}, true),", field.name, arrow_type)?;
     }
     writeln!(file, "        ]);")?;
     writeln!(file, "")?;
@@ -332,7 +328,7 @@ fn map_to_arrow_type(field_type: &FieldType) -> String {
         FieldType::U16 => "DataType::UInt16".to_string(),
         FieldType::U32 => "DataType::UInt32".to_string(),
         FieldType::U64 => "DataType::UInt64".to_string(),
-        FieldType::U128 => "DataType::UInt128".to_string(),
+        FieldType::U128 => "DataType::Utf8".to_string(),
         FieldType::Boolean => "DataType::Boolean".to_string(),
         FieldType::Uuid => "DataType::Utf8".to_string(), // UUID 作为字符串存储
         FieldType::Date => "DataType::Timestamp(deltalake::arrow::datatypes::TimeUnit::Microsecond, Some(\"UTC\".into()))".to_string(),
@@ -355,7 +351,7 @@ fn map_type_to_rust(field_type: &FieldType) -> String {
         FieldType::U16 => "Option<u16>".to_string(),
         FieldType::U32 => "Option<u32>".to_string(),
         FieldType::U64 => "Option<u64>".to_string(),
-        FieldType::U128 => "Option<u128>".to_string(),
+        FieldType::U128 => "Option<String>".to_string(),
         FieldType::Boolean => "Option<bool>".to_string(),
         FieldType::Uuid => "Option<ID>".to_string(),
         FieldType::Date => "Option<DateTime<Utc>>".to_string(),
@@ -380,7 +376,7 @@ fn map_type_to_rust_inner(field_type: &FieldType) -> String {
         FieldType::U16 => "u16".to_string(),
         FieldType::U32 => "u32".to_string(),
         FieldType::U64 => "u64".to_string(),
-        FieldType::U128 => "u128".to_string(),
+        FieldType::U128 => "String".to_string(),
         FieldType::Boolean => "bool".to_string(),
         FieldType::Uuid => "ID".to_string(),
         FieldType::Date => "DateTime<Utc>".to_string(),

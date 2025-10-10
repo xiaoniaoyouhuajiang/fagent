@@ -12,7 +12,7 @@ pub enum EntityCategory {
 pub trait Fetchable: Send + Sync + Clone + 'static {
     const ENTITY_TYPE: &'static str;
     fn table_name() -> String {
-        format!("entities/{}", Self::ENTITY_TYPE)
+        format!("silver/entities/{}", Self::ENTITY_TYPE)
     }
     fn primary_keys() -> Vec<&'static str>;
     /// Specifies the category of the entity in the graph.
@@ -21,10 +21,12 @@ pub trait Fetchable: Send + Sync + Clone + 'static {
 }
 
 // A helper trait for type erasure.
-pub trait AnyFetchable: Send {
+pub trait AnyFetchable: Send + Sync {
     fn to_record_batch_any(&self) -> Result<RecordBatch>;
     fn entity_type_any(&self) -> &'static str;
     fn category_any(&self) -> EntityCategory;
+    fn primary_keys_any(&self) -> Vec<&'static str>;
+    fn table_name(&self) -> String;
 }
 
 impl<T: Fetchable + 'static> AnyFetchable for Vec<T> {
@@ -36,6 +38,12 @@ impl<T: Fetchable + 'static> AnyFetchable for Vec<T> {
     }
     fn category_any(&self) -> EntityCategory {
         T::category()
+    }
+    fn primary_keys_any(&self) -> Vec<&'static str> {
+        T::primary_keys()
+    }
+    fn table_name(&self) -> String {
+        T::table_name()
     }
 }
 

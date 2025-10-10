@@ -2,6 +2,7 @@ use crate::catalog::Catalog;
 use crate::errors::{Result, StorageError};
 use crate::fetch::{EntityCategory, FetchResponse, Fetcher, GraphData};
 use crate::lake::Lake;
+use crate::utils;
 use crate::models::{EntityIdentifier, ReadinessReport, SyncContext, SyncBudget};
 use async_trait::async_trait;
 use bincode;
@@ -52,6 +53,9 @@ pub trait DataSynchronizer {
 
     /// Runs a full ETL process from the data lake to the graph engine.
     async fn run_full_etl_from_lake(&self, target_repo_uri: &str) -> Result<()>;
+
+    /// COLD & HOT PATH: Processes a unified GraphData object.
+    async fn process_graph_data(&self, graph_data: GraphData) -> Result<()>;
 }
 
 use crate::embedding::EmbeddingProvider;
@@ -110,19 +114,22 @@ impl FStorageSynchronizer {
                 let arr = column.as_any().downcast_ref::<BooleanArray>().unwrap();
                 Some(Value::Boolean(arr.value(row_idx)))
             }
-            DataType::Timestamp(_, _) => {
-                // Assuming Timestamp is stored as Nanoseconds in Arrow
-                let arr = column
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>();
-                
-                if let Some(arr) = arr {
-                     let datetime = chrono::DateTime::from_timestamp_nanos(arr.value(row_idx));
-                     Some(Value::String(datetime.to_rfc3339())) // Store timestamps as ISO 8601 strings
-                } else {
+            DataType::Timestamp(unit, _) => match unit {
+                deltalake::arrow::datatypes::TimeUnit::Microsecond => {
+                    let arr = column
+                        .as_any()
+                        .downcast_ref::<TimestampMicrosecondArray>()
+                        .unwrap();
+                    let micros = arr.value(row_idx);
+                    let dt = chrono::DateTime::from_timestamp_micros(micros).unwrap();
+                    Some(Value::String(dt.to_rfc3339()))
+                }
+                _ => {
+                    // Handle other time units if necessary, for now just log and ignore
+                    log::warn!("Unsupported timestamp unit: {:?}", unit);
                     None
                 }
-            }
+            },
             _ => None, // Add other type conversions as needed
         }
     }
@@ -151,31 +158,49 @@ impl FStorageSynchronizer {
 
                     for (field, column) in schema.fields().iter().zip(batch.columns()) {
                         if let Some(value) = Self::arrow_value_to_helix_value(column, i) {
-                            if field.name() == "id" {
-                                node_id_str = Some(value.to_string());
-                            } else {
-                                properties.insert(field.name().clone(), value);
+                            match field.name().as_str() {
+                                "id" => {
+                                    node_id_str = Some(value.inner_stringify());
+                                }
+                                _ => {
+                                    properties.insert(field.name().clone(), value);
+                                }
                             }
                         }
                     }
 
-                    let id_str = if let Some(s) = node_id_str {
-                        s
+                    let id_u128 = if let Some(id_str) = node_id_str {
+                        match Uuid::parse_str(&id_str) {
+                            Ok(id) => id.as_u128(),
+                            Err(_) => {
+                                log::warn!("Failed to parse UUID for node id: {}", id_str);
+                                continue;
+                            }
+                        }
                     } else {
-                        log::warn!(
-                            "Skipping node of type '{}' at row {} due to missing 'id'",
-                            entity_type,
-                            i
-                        );
-                        continue;
-                    };
-
-                    let id_u128 = match Uuid::parse_str(&id_str) {
-                        Ok(id) => id.as_u128(),
-                        Err(_) => {
-                            log::warn!("Failed to parse UUID for node id: {}", id_str);
+                        let primary_keys = fetchable_collection.primary_keys_any();
+                        if primary_keys.is_empty() {
+                            log::warn!(
+                                "Skipping node of type '{}' at row {} due to missing 'id' and no primary keys defined.",
+                                entity_type,
+                                i
+                            );
                             continue;
                         }
+                        let key_values: Vec<_> = primary_keys
+                            .iter()
+                            .filter_map(|key| {
+                                schema.index_of(key).ok().map(|idx| {
+                                    let col = batch.column(idx);
+                                    let val = Self::arrow_value_to_helix_value(col, i)
+                                        .map(|v| v.inner_stringify())
+                                        .unwrap_or_default();
+                                    (*key, val)
+                                })
+                            })
+                            .collect();
+
+                        utils::id::stable_node_id_u128(entity_type, &key_values)
                     };
 
                     if self.engine.storage.get_node(&txn, &id_u128).is_ok() {
@@ -184,7 +209,7 @@ impl FStorageSynchronizer {
                         G::new_mut_from(self.engine.storage.clone(), &mut txn, traversal)
                             .update(Some(props_vec))
                             .for_each(|_| {});
-                        log::debug!("Updating node: {} ({})", id_str, entity_type);
+                        log::debug!("Updating node: {} ({})", Uuid::from_u128(id_u128).to_string(), entity_type);
                     } else {
                         let node = Node {
                             id: id_u128,
@@ -209,7 +234,7 @@ impl FStorageSynchronizer {
                                 bm25.insert_doc(&mut txn, node.id, &data)?;
                             }
                         }
-                        log::debug!("Inserting node: {} ({})", id_str, entity_type);
+                        log::debug!("Inserting node: {} ({})", Uuid::from_u128(id_u128).to_string(), entity_type);
                     }
                 }
             }
@@ -223,9 +248,9 @@ impl FStorageSynchronizer {
                     for (field, column) in schema.fields().iter().zip(batch.columns()) {
                         if let Some(value) = Self::arrow_value_to_helix_value(column, i) {
                             match field.name().as_str() {
-                                "id" => edge_id_str = Some(value.to_string()),
-                                "from_node_id" => from_node_id_str = Some(value.to_string()),
-                                "to_node_id" => to_node_id_str = Some(value.to_string()),
+                                "id" => edge_id_str = Some(value.inner_stringify()),
+                                "from_node_id" => from_node_id_str = Some(value.inner_stringify()),
+                                "to_node_id" => to_node_id_str = Some(value.inner_stringify()),
                                 _ => {
                                     properties.insert(field.name().clone(), value);
                                 }
@@ -233,23 +258,26 @@ impl FStorageSynchronizer {
                         }
                     }
 
-                    let (id_str, from_str, to_str) =
-                        if let (Some(id), Some(from), Some(to)) =
-                            (edge_id_str, from_node_id_str, to_node_id_str)
-                        {
-                            (id, from, to)
+                    let (from_str, to_str) =
+                        if let (Some(from), Some(to)) = (from_node_id_str.clone(), to_node_id_str.clone()) {
+                            (from, to)
                         } else {
-                            log::warn!("Skipping edge of type '{}' at row {} due to missing id, from_node_id, or to_node_id", entity_type, i);
+                            log::warn!("Skipping edge of type '{}' at row {} due to missing from_node_id or to_node_id", entity_type, i);
                             continue;
                         };
 
-                    let id_u128 = match Uuid::parse_str(&id_str) {
-                        Ok(id) => id.as_u128(),
-                        Err(_) => {
-                            log::warn!("Failed to parse UUID for edge id: {}", id_str);
-                            continue;
+                    let id_u128 = if let Some(id_str) = edge_id_str.clone() {
+                        match Uuid::parse_str(&id_str) {
+                            Ok(id) => id.as_u128(),
+                            Err(_) => {
+                                log::warn!("Failed to parse UUID for edge id: {}", id_str);
+                                continue;
+                            }
                         }
+                    } else {
+                        utils::id::stable_edge_id_u128(entity_type, &from_str, &to_str)
                     };
+
                     let from_u128 = match Uuid::parse_str(&from_str) {
                         Ok(id) => id.as_u128(),
                         Err(_) => {
@@ -271,7 +299,7 @@ impl FStorageSynchronizer {
                         G::new_mut_from(self.engine.storage.clone(), &mut txn, traversal)
                             .update(Some(props_vec))
                             .for_each(|_| {});
-                        log::debug!("Updating edge: {} ({})", id_str, entity_type);
+                        log::debug!("Updating edge: {} ({})", Uuid::from_u128(id_u128).to_string(), entity_type);
                     } else {
                         let edge = Edge {
                             id: id_u128,
@@ -296,7 +324,7 @@ impl FStorageSynchronizer {
                             &helix_db::helix_engine::storage_core::HelixGraphStorage::in_edge_key(&edge.to_node, &label_hash),
                             &helix_db::helix_engine::storage_core::HelixGraphStorage::pack_edge_data(&edge.id, &edge.from_node),
                         )?;
-                        log::debug!("Inserting edge: {} ({})", id_str, entity_type);
+                        log::debug!("Inserting edge: {} ({})", Uuid::from_u128(id_u128).to_string(), entity_type);
                     }
                 }
             }
@@ -305,16 +333,17 @@ impl FStorageSynchronizer {
         txn.commit()?;
         Ok(())
     }
+}
 
-    /// COLD & HOT PATH: Processes a unified GraphData object.
+#[async_trait]
+impl DataSynchronizer for FStorageSynchronizer {
     async fn process_graph_data(&self, graph_data: GraphData) -> Result<()> {
         // --- STAGE 2: Persistence - Process all entities (original and newly created) ---
         for fetchable_collection in graph_data.entities {
             let record_batch = fetchable_collection.to_record_batch_any()?;
-            let entity_type = fetchable_collection.entity_type_any();
             
             // Cold Path: Write to Data Lake
-            let table_name = format!("entities/{}", entity_type.to_lowercase());
+            let table_name = fetchable_collection.table_name();
             self.lake
                 .write_batches(&table_name, vec![record_batch.clone()], None)
                 .await?;
@@ -325,10 +354,6 @@ impl FStorageSynchronizer {
 
         Ok(())
     }
-}
-
-#[async_trait]
-impl DataSynchronizer for FStorageSynchronizer {
     fn register_fetcher(&mut self, fetcher: Arc<dyn Fetcher>) {
         self.fetchers.insert(fetcher.name(), fetcher);
     }
