@@ -1,6 +1,6 @@
 use crate::client::Fetcher;
 use crate::error::Result;
-use crate::models::{DetailLevel, Issue, PullRequest, Commit, RepoData};
+use crate::models::{Commit, DetailLevel, Issue, PullRequest, RepoData};
 
 /// Fetches issues for a given repository.
 pub async fn fetch_issues(
@@ -36,7 +36,7 @@ pub async fn fetch_issues(
                 },
             });
         }
-        
+
         let next_page = fetcher.octocrab.get_page(&page.next).await?;
         match next_page {
             Some(new_page) => page = new_page,
@@ -70,7 +70,11 @@ pub async fn fetch_pull_requests(
                 id: pr.id.0,
                 number: pr.number,
                 title: pr.title.clone().unwrap_or_default(),
-                user: pr.user.as_ref().map(|u| u.login.clone()).unwrap_or_default(),
+                user: pr
+                    .user
+                    .as_ref()
+                    .map(|u| u.login.clone())
+                    .unwrap_or_default(),
                 state: format!("{:?}", pr.state),
                 created_at: pr.created_at.unwrap_or_default().to_rfc3339(),
                 updated_at: pr.updated_at.unwrap_or_default().to_rfc3339(),
@@ -82,7 +86,7 @@ pub async fn fetch_pull_requests(
                 },
             });
         }
-        
+
         let next_page = fetcher.octocrab.get_page(&page.next).await?;
         match next_page {
             Some(new_page) => page = new_page,
@@ -116,15 +120,22 @@ pub async fn fetch_commits(
             } else {
                 "unknown".to_string()
             };
-            
+
             commits.push(Commit {
                 sha: commit.sha.clone(),
                 author,
                 message: commit.commit.message.clone(),
-                date: commit.commit.author.as_ref().unwrap().date.unwrap_or_default().to_rfc3339(),
+                date: commit
+                    .commit
+                    .author
+                    .as_ref()
+                    .unwrap()
+                    .date
+                    .unwrap_or_default()
+                    .to_rfc3339(),
             });
         }
-        
+
         let next_page = fetcher.octocrab.get_page(&page.next).await?;
         match next_page {
             Some(new_page) => page = new_page,

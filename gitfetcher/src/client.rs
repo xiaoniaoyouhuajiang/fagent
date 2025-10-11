@@ -1,5 +1,5 @@
+use crate::error::{FetcherError, Result};
 use octocrab::Octocrab;
-use crate::error::{Result, FetcherError};
 
 /// The `Fetcher` client, responsible for handling authentication and interaction with the GitHub API.
 pub struct Fetcher {

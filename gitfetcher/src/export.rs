@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::models::{NetworkData, UserFollowRelation, RepoDependency, RepoFork, UserCollaboration};
+use crate::models::{NetworkData, RepoDependency, RepoFork, UserCollaboration, UserFollowRelation};
 use serde::Serialize;
 use std::fs::File;
 use std::io::Write;
@@ -27,7 +27,7 @@ pub fn save_to_csv<T: Serialize>(data: &[T], path: &str) -> Result<()> {
 /// Saves network data to separate files for each network type
 pub fn save_network_data(network_data: &NetworkData, output_dir: &str, format: &str) -> Result<()> {
     std::fs::create_dir_all(output_dir)?;
-    
+
     let extension = match format {
         "json" => "json",
         "csv" => "csv",
@@ -35,38 +35,58 @@ pub fn save_network_data(network_data: &NetworkData, output_dir: &str, format: &
         "edgelist" => "txt",
         _ => "json",
     };
-    
+
     if !network_data.user_follow_relations.is_empty() {
-        let path = std::path::Path::new(output_dir).join(format!("user_follow_relations.{}", extension));
-        save_network_edges(&network_data.user_follow_relations, &path.to_string_lossy(), format)?;
+        let path =
+            std::path::Path::new(output_dir).join(format!("user_follow_relations.{}", extension));
+        save_network_edges(
+            &network_data.user_follow_relations,
+            &path.to_string_lossy(),
+            format,
+        )?;
     }
-    
+
     if !network_data.repo_dependencies.is_empty() {
-        let path = std::path::Path::new(output_dir).join(format!("repo_dependencies.{}", extension));
-        save_network_edges(&network_data.repo_dependencies, &path.to_string_lossy(), format)?;
+        let path =
+            std::path::Path::new(output_dir).join(format!("repo_dependencies.{}", extension));
+        save_network_edges(
+            &network_data.repo_dependencies,
+            &path.to_string_lossy(),
+            format,
+        )?;
     }
-    
+
     if !network_data.repo_forks.is_empty() {
         let path = std::path::Path::new(output_dir).join(format!("repo_forks.{}", extension));
         save_network_edges(&network_data.repo_forks, &path.to_string_lossy(), format)?;
     }
-    
+
     if !network_data.user_collaborations.is_empty() {
-        let path = std::path::Path::new(output_dir).join(format!("user_collaborations.{}", extension));
-        save_network_edges(&network_data.user_collaborations, &path.to_string_lossy(), format)?;
+        let path =
+            std::path::Path::new(output_dir).join(format!("user_collaborations.{}", extension));
+        save_network_edges(
+            &network_data.user_collaborations,
+            &path.to_string_lossy(),
+            format,
+        )?;
     }
-    
+
     // Save combined network data as JSON
-    let combined_path = std::path::Path::new(output_dir).join(format!("network_data.{}", extension));
+    let combined_path =
+        std::path::Path::new(output_dir).join(format!("network_data.{}", extension));
     let json_string = serde_json::to_string_pretty(network_data)?;
     let mut file = std::fs::File::create(combined_path)?;
     file.write_all(json_string.as_bytes())?;
-    
+
     Ok(())
 }
 
 /// Generic function to save network edge data in various formats
-fn save_network_edges<T: NetworkEdge + serde::Serialize>(edges: &[T], path: &str, format: &str) -> Result<()> {
+fn save_network_edges<T: NetworkEdge + serde::Serialize>(
+    edges: &[T],
+    path: &str,
+    format: &str,
+) -> Result<()> {
     match format {
         "json" => save_to_json(edges, path),
         "csv" => save_to_csv(edges, path),
@@ -79,21 +99,21 @@ fn save_network_edges<T: NetworkEdge + serde::Serialize>(edges: &[T], path: &str
 /// Saves edge data as a simple edge list (source,target[,weight])
 fn save_to_edgelist<T: NetworkEdge>(edges: &[T], path: &str) -> Result<()> {
     let mut file = File::create(path)?;
-    
+
     // Write header for weighted edges if available
     if edges.first().map_or(false, |e| e.weight().is_some()) {
         writeln!(file, "source,target,weight")?;
     } else {
         writeln!(file, "source,target")?;
     }
-    
+
     for edge in edges {
         match edge.weight() {
             Some(weight) => writeln!(file, "{},{},{}", edge.source(), edge.target(), weight)?,
             None => writeln!(file, "{},{}", edge.source(), edge.target())?,
         }
     }
-    
+
     Ok(())
 }
 
@@ -118,7 +138,7 @@ impl NetworkEdge for UserFollowRelation {
     fn source(&self) -> String {
         self.follower_login.clone()
     }
-    
+
     fn target(&self) -> String {
         self.followed_login.clone()
     }
@@ -128,11 +148,11 @@ impl NetworkEdge for RepoDependency {
     fn source(&self) -> String {
         self.source_repo_name.clone()
     }
-    
+
     fn target(&self) -> String {
         self.target_repo_name.clone()
     }
-    
+
     fn weight(&self) -> Option<String> {
         Some(self.dependency_type.clone())
     }
@@ -142,7 +162,7 @@ impl NetworkEdge for RepoFork {
     fn source(&self) -> String {
         self.source_repo_name.clone()
     }
-    
+
     fn target(&self) -> String {
         self.fork_repo_name.clone()
     }
@@ -152,11 +172,11 @@ impl NetworkEdge for UserCollaboration {
     fn source(&self) -> String {
         self.user_login.clone()
     }
-    
+
     fn target(&self) -> String {
         self.repo_name.clone()
     }
-    
+
     fn weight(&self) -> Option<String> {
         Some(self.collaboration_type.clone())
     }

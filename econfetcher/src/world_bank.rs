@@ -1,9 +1,9 @@
 //! World Bank Data API module
-//! 
+//!
 //! This module provides an asynchronous interface to the World Bank Data API v2,
 //! allowing users to fetch economic data, indicators, countries, and other information.
 
-use serde::{Deserialize, Serialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 /// Base URL for World Bank API
@@ -14,16 +14,16 @@ const WORLD_BANK_URL: &str = "https://api.worldbank.org/v2";
 pub enum WorldBankError {
     #[error("HTTP request failed: {0}")]
     RequestError(#[from] reqwest::Error),
-    
+
     #[error("API returned error: {0}")]
     ApiError(String),
-    
+
     #[error("JSON deserialization failed: {0}")]
     JsonError(#[from] serde_json::Error),
-    
+
     #[error("No data found for the request")]
     NoDataError,
-    
+
     #[error("Invalid parameters: {0}")]
     InvalidParameters(String),
 }
@@ -41,7 +41,7 @@ pub struct WorldBankClient {
 impl Default for WorldBankClient {
     fn default() -> Self {
         Self {
-            http_client: reqwest::Client::new(),
+            http_client: Self::build_http_client(),
             language: "en".to_string(),
         }
     }
@@ -52,48 +52,56 @@ impl WorldBankClient {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Create a new WorldBankClient with specified language
     pub fn with_language(language: &str) -> Self {
         Self {
-            http_client: reqwest::Client::new(),
+            http_client: Self::build_http_client(),
             language: language.to_string(),
         }
     }
-    
+
+    fn build_http_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("failed to create WorldBank HTTP client")
+    }
+
     /// Get the current language setting
     pub fn language(&self) -> &str {
         &self.language
     }
-    
+
     /// Set the language for API responses
     pub fn set_language(&mut self, language: &str) {
         self.language = language.to_string();
     }
-    
+
     /// Make a request to the World Bank API
     async fn make_request<T>(&self, endpoint: &str, params: &[&str]) -> Result<T>
     where
         T: for<'de> serde::Deserialize<'de>,
     {
         let mut url = format!("{}/{}", WORLD_BANK_URL, endpoint);
-        
+
         // Add language parameter if not English
         if self.language != "en" {
             url = format!("{}/{}", self.language, url);
         }
-        
+
         // Add additional parameters
         for param in params {
             url = format!("{}/{}", url, param);
         }
-        
-        let response = self.http_client
+
+        let response = self
+            .http_client
             .get(&url)
             .query(&[("format", "json"), ("per_page", "20000")])
             .send()
             .await?;
-            
+
         if !response.status().is_success() {
             return Err(WorldBankError::ApiError(format!(
                 "HTTP {}: {}",
@@ -101,22 +109,25 @@ impl WorldBankClient {
                 response.text().await.unwrap_or_default()
             )));
         }
-        
+
         let data: serde_json::Value = response.json().await?;
-        
+
         // Handle API error messages
         if let Some(array) = data.as_array() {
             if array.len() > 0 && array[0].get("message").is_some() {
                 if let Some(msg) = array[0]["message"].as_array() {
                     if msg.len() > 0 && msg[0].get("value").is_some() {
                         return Err(WorldBankError::ApiError(
-                            msg[0]["value"].as_str().unwrap_or("Unknown API error").to_string()
+                            msg[0]["value"]
+                                .as_str()
+                                .unwrap_or("Unknown API error")
+                                .to_string(),
                         ));
                     }
                 }
             }
         }
-        
+
         // Handle the World Bank API's response format: [metadata, actual_data]
         if let Some(array) = data.as_array() {
             if array.len() >= 2 {
@@ -127,64 +138,73 @@ impl WorldBankClient {
                 return serde_json::from_value(array[0].clone()).map_err(WorldBankError::JsonError);
             }
         }
-        
+
         serde_json::from_value(data).map_err(WorldBankError::JsonError)
     }
-    
+
     /// Fetch a list of countries
     pub async fn get_countries(&self) -> Result<Vec<Country>> {
         self.make_request("country", &[]).await
     }
-    
+
     /// Fetch a specific country by ID
     pub async fn get_country(&self, country_id: &str) -> Result<Country> {
         let countries: Vec<Country> = self.make_request("country", &[country_id]).await?;
-        countries.into_iter()
+        countries
+            .into_iter()
             .next()
             .ok_or(WorldBankError::NoDataError)
     }
-    
+
     /// Fetch all available indicators
     pub async fn get_indicators(&self) -> Result<Vec<Indicator>> {
         self.make_request("indicator", &[]).await
     }
-    
+
     /// Fetch a specific indicator by ID
     pub async fn get_indicator(&self, indicator_id: &str) -> Result<Indicator> {
         let indicators: Vec<Indicator> = self.make_request("indicator", &[indicator_id]).await?;
-        indicators.into_iter()
+        indicators
+            .into_iter()
             .next()
             .ok_or(WorldBankError::NoDataError)
     }
-    
+
     /// Fetch data series for an indicator
-    pub async fn get_series(&self, indicator_id: &str, options: &SeriesOptions) -> Result<SeriesData> {
+    pub async fn get_series(
+        &self,
+        indicator_id: &str,
+        options: &SeriesOptions,
+    ) -> Result<SeriesData> {
         let country = options.country.as_deref().unwrap_or("all");
         let url = if self.language == "en" {
             format!("{}/{}/indicator/{}", WORLD_BANK_URL, country, indicator_id)
         } else {
-            format!("{}/{}/{}/indicator/{}", self.language, WORLD_BANK_URL, country, indicator_id)
+            format!(
+                "{}/{}/{}/indicator/{}",
+                self.language, WORLD_BANK_URL, country, indicator_id
+            )
         };
-        
+
         let mut request = self.http_client.get(&url);
-        
+
         // Add query parameters
         request = request.query(&[("format", "jsonstat")]);
-        
+
         if let Some(date) = &options.date {
             request = request.query(&[("date", date)]);
         }
-        
+
         if let Some(mrv) = options.mrv {
             request = request.query(&[("mrv", &mrv.to_string())]);
         }
-        
+
         if let Some(gapfill) = &options.gapfill {
             request = request.query(&[("gapfill", gapfill)]);
         }
-        
+
         let response = request.send().await?;
-            
+
         if !response.status().is_success() {
             return Err(WorldBankError::ApiError(format!(
                 "HTTP {}: {}",
@@ -192,52 +212,56 @@ impl WorldBankClient {
                 response.text().await.unwrap_or_default()
             )));
         }
-        
+
         let data: serde_json::Value = response.json().await?;
         serde_json::from_value(data).map_err(WorldBankError::JsonError)
     }
-    
+
     /// Fetch available topics
     pub async fn get_topics(&self) -> Result<Vec<Topic>> {
         self.make_request("topic", &[]).await
     }
-    
+
     /// Fetch available sources
     pub async fn get_sources(&self) -> Result<Vec<Source>> {
         self.make_request("source", &[]).await
     }
-    
+
     /// Fetch available regions
     pub async fn get_regions(&self) -> Result<Vec<Region>> {
         self.make_request("region", &[]).await
     }
-    
+
     /// Search countries by name or other criteria
     pub async fn search_countries(&self, pattern: &str) -> Result<Vec<Country>> {
         let countries = self.get_countries().await?;
         let pattern_lower = pattern.to_lowercase();
-        
-        Ok(countries.into_iter()
+
+        Ok(countries
+            .into_iter()
             .filter(|country| {
-                country.name.to_lowercase().contains(&pattern_lower) ||
-                country.id.to_lowercase().contains(&pattern_lower) ||
-                country.iso2_code.to_lowercase().contains(&pattern_lower)
+                country.name.to_lowercase().contains(&pattern_lower)
+                    || country.id.to_lowercase().contains(&pattern_lower)
+                    || country.iso2_code.to_lowercase().contains(&pattern_lower)
             })
             .collect())
     }
-    
+
     /// Search indicators by name or other criteria
     pub async fn search_indicators(&self, pattern: &str) -> Result<Vec<Indicator>> {
         let indicators = self.get_indicators().await?;
         let pattern_lower = pattern.to_lowercase();
-        
-        Ok(indicators.into_iter()
+
+        Ok(indicators
+            .into_iter()
             .filter(|indicator| {
-                indicator.name.to_lowercase().contains(&pattern_lower) ||
-                indicator.id.to_lowercase().contains(&pattern_lower) ||
-                indicator.source_note.as_ref()
-                    .map(|note| note.to_lowercase().contains(&pattern_lower))
-                    .unwrap_or(false)
+                indicator.name.to_lowercase().contains(&pattern_lower)
+                    || indicator.id.to_lowercase().contains(&pattern_lower)
+                    || indicator
+                        .source_note
+                        .as_ref()
+                        .map(|note| note.to_lowercase().contains(&pattern_lower))
+                        .unwrap_or(false)
             })
             .collect())
     }
@@ -381,41 +405,43 @@ where
     D: Deserializer<'de>,
 {
     let value: serde_json::Value = Deserialize::deserialize(deserializer)?;
-    
+
     match value {
         serde_json::Value::Number(n) => Ok(Some(n.as_f64().unwrap_or(0.0))),
         serde_json::Value::String(s) => {
             if s.is_empty() {
                 Ok(None)
             } else {
-                s.parse::<f64>().map(Some).map_err(|_| {
-                    serde::de::Error::custom(format!("Cannot parse '{}' as f64", s))
-                })
+                s.parse::<f64>()
+                    .map(Some)
+                    .map_err(|_| serde::de::Error::custom(format!("Cannot parse '{}' as f64", s)))
             }
         }
         serde_json::Value::Null => Ok(None),
-        _ => Err(serde::de::Error::custom("Expected number or string for float field")),
+        _ => Err(serde::de::Error::custom(
+            "Expected number or string for float field",
+        )),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_client_creation() {
         let client = WorldBankClient::new();
         assert_eq!(client.language(), "en");
-        
+
         let client_fr = WorldBankClient::with_language("fr");
         assert_eq!(client_fr.language(), "fr");
     }
-    
+
     #[tokio::test]
     async fn test_get_countries() {
         let client = WorldBankClient::new();
         let result = client.get_countries().await;
-        
+
         match result {
             Ok(countries) => {
                 assert!(!countries.is_empty());
@@ -427,12 +453,12 @@ mod tests {
             }
         }
     }
-    
+
     #[tokio::test]
     async fn test_search_countries() {
         let client = WorldBankClient::new();
         let result = client.search_countries("China").await;
-        
+
         match result {
             Ok(countries) => {
                 assert!(!countries.is_empty());
@@ -444,12 +470,12 @@ mod tests {
             }
         }
     }
-    
+
     #[tokio::test]
     async fn test_get_indicators() {
         let client = WorldBankClient::new();
         let result = client.get_indicators().await;
-        
+
         match result {
             Ok(indicators) => {
                 assert!(!indicators.is_empty());
@@ -460,12 +486,12 @@ mod tests {
             }
         }
     }
-    
+
     #[tokio::test]
     async fn test_get_topics() {
         let client = WorldBankClient::new();
         let result = client.get_topics().await;
-        
+
         match result {
             Ok(topics) => {
                 assert!(!topics.is_empty());

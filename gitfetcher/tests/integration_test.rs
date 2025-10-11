@@ -1,6 +1,9 @@
-use gitfetcher::{run, models::{OutputFormat, DetailLevel}};
-use tempfile::tempdir;
+use gitfetcher::{
+    models::{DetailLevel, OutputFormat},
+    run,
+};
 use std::path::Path;
+use tempfile::tempdir;
 
 #[tokio::test]
 async fn test_full_workflow_with_json() {
@@ -16,25 +19,31 @@ async fn test_full_workflow_with_json() {
 
     // Test with a well-known public repository
     let result = run(
-        "rust-lang", 
-        "rust", 
+        "rust-lang",
+        "rust",
         Some(github_token.unwrap()),
         OutputFormat::Json,
         DetailLevel::Core,
         output_dir,
-    ).await;
+    )
+    .await;
 
     // Note: This test may fail due to API rate limits or network issues
     // The important thing is that the library compiles and the workflow functions are called
     if let Err(e) = result {
-        println!("Integration test failed (expected due to API limits): {}", e);
+        println!(
+            "Integration test failed (expected due to API limits): {}",
+            e
+        );
         return;
     }
 
     // Verify output files were created
-    assert!(Path::new(output_dir).join("issues.json").exists() || 
-            Path::new(output_dir).join("pull_requests.json").exists() ||
-            Path::new(output_dir).join("commits.json").exists());
+    assert!(
+        Path::new(output_dir).join("issues.json").exists()
+            || Path::new(output_dir).join("pull_requests.json").exists()
+            || Path::new(output_dir).join("commits.json").exists()
+    );
 }
 
 #[tokio::test]
@@ -51,16 +60,20 @@ async fn test_full_workflow_with_csv() {
 
     // Test with a small repository to avoid rate limiting
     let result = run(
-        "octocat", 
-        "Hello-World", 
+        "octocat",
+        "Hello-World",
         Some(github_token.unwrap()),
         OutputFormat::Csv,
         DetailLevel::Core,
         output_dir,
-    ).await;
+    )
+    .await;
 
     if let Err(e) = result {
-        println!("Integration test failed (expected due to API limits): {}", e);
+        println!(
+            "Integration test failed (expected due to API limits): {}",
+            e
+        );
         return;
     }
 

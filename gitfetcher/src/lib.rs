@@ -1,13 +1,20 @@
+pub mod analysis;
 pub mod client;
 pub mod error;
-pub mod models;
-pub mod fetch;
 pub mod export;
+pub mod fetch;
+pub mod models;
 pub mod network;
-pub mod analysis;
 
-pub use models::{DetailLevel, OutputFormat, RepoData, NetworkData, UserFollowRelation, RepoDependency, RepoFork, UserCollaboration};
-pub use analysis::{NetworkMetrics, analyze_user_follow_network, analyze_repo_fork_network, analyze_collaboration_network, find_top_influential_users, find_most_forked_repos, find_most_active_collaborators, generate_network_summary};
+pub use analysis::{
+    analyze_collaboration_network, analyze_repo_fork_network, analyze_user_follow_network,
+    find_most_active_collaborators, find_most_forked_repos, find_top_influential_users,
+    generate_network_summary, NetworkMetrics,
+};
+pub use models::{
+    DetailLevel, NetworkData, OutputFormat, RepoData, RepoDependency, RepoFork, UserCollaboration,
+    UserFollowRelation,
+};
 
 use crate::client::Fetcher;
 use crate::error::Result;
@@ -123,7 +130,8 @@ pub async fn run_network_fetch(
 ) -> Result<()> {
     std::fs::create_dir_all(output_dir)?;
 
-    let network_data = fetch_network_to_memory(owner, repo, token, user_depth, fork_depth, max_items).await?;
+    let network_data =
+        fetch_network_to_memory(owner, repo, token, user_depth, fork_depth, max_items).await?;
 
     export::save_network_data(&network_data, output_dir, format)?;
 
@@ -131,11 +139,7 @@ pub async fn run_network_fetch(
 }
 
 /// Helper function to save data based on the selected format.
-fn save_data<T: serde::Serialize>(
-    data: &[T],
-    path: &str,
-    format: OutputFormat,
-) -> Result<()> {
+fn save_data<T: serde::Serialize>(data: &[T], path: &str, format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json => export::save_to_json(data, path),
         OutputFormat::Csv => export::save_to_csv(data, path),
