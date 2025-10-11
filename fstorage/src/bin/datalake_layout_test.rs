@@ -1,6 +1,6 @@
 use fstorage::{FStorage, config::StorageConfig, schemas::generated_schemas::{Project, Developer, Commit, Version, Issue}, fetch::Fetchable};
 use tempfile::tempdir;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -130,12 +130,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✅ Bronze layer: {}/bronze/", config.lake_path.display());
     println!("✅ Silver layer: {}/silver/", config.lake_path.display());
     println!("✅ Entity tables: {}/silver/entities/", config.lake_path.display());
-    println!("✅ PROJECT table: {}/silver/entities/projects/", config.lake_path.display());
-    println!("✅ DEVELOPER table: {}/silver/entities/developers/", config.lake_path.display());
-    println!("✅ COMMIT table: {}/silver/entities/commits/", config.lake_path.display());
-    println!("✅ VERSION table: {}/silver/entities/versions/", config.lake_path.display());
-    println!("✅ ISSUE table: {}/silver/entities/issues/", config.lake_path.display());
-    println!("✅ Total entities tested: 6 types");
+    println!(
+        "✅ PROJECT table: {}/{}/",
+        config.lake_path.display(),
+        Project::table_name()
+    );
+    println!(
+        "✅ DEVELOPER table: {}/{}/",
+        config.lake_path.display(),
+        Developer::table_name()
+    );
+    println!(
+        "✅ COMMIT table: {}/{}/",
+        config.lake_path.display(),
+        Commit::table_name()
+    );
+    println!(
+        "✅ VERSION table: {}/{}/",
+        config.lake_path.display(),
+        Version::table_name()
+    );
+    println!(
+        "✅ ISSUE table: {}/{}/",
+        config.lake_path.display(),
+        Issue::table_name()
+    );
+    println!("✅ Total entities tested: 5 types");
     
     Ok(())
 }
@@ -173,15 +193,16 @@ async fn verify_delta_tables(storage: &FStorage) -> Result<(), Box<dyn std::erro
     let base_path = &storage.config.lake_path;
     
     let tables_to_check = vec![
-        ("PROJECT", "silver/entities/projects"),
-        ("DEVELOPER", "silver/entities/developers"),
-        ("COMMIT", "silver/entities/commits"),
-        ("VERSION", "silver/entities/versions"),
-        ("ISSUE", "silver/entities/issues"),
+        ("PROJECT", Project::table_name()),
+        ("DEVELOPER", Developer::table_name()),
+        ("COMMIT", Commit::table_name()),
+        ("VERSION", Version::table_name()),
+        ("ISSUE", Issue::table_name()),
     ];
     
     for (table_name, table_path) in tables_to_check {
-        match deltalake::open_table(base_path.join(table_path).to_str().unwrap()).await {
+        let table_uri = base_path.join(&table_path).to_string_lossy().to_string();
+        match deltalake::open_table(&table_uri).await {
             Ok(table) => {
                 println!("  ✅ {} table: {} files, version {}", 
                     table_name,
