@@ -3,11 +3,31 @@ use crate::errors::{Result, StorageError};
 use deltalake::arrow::record_batch::RecordBatch;
 use deltalake::datafusion::datasource::MemTable;
 use deltalake::datafusion::execution::context::SessionContext;
+use deltalake::kernel::Action;
+use deltalake::ObjectStore;
+use deltalake::storage::{ObjectStoreRef, Path as ObjectPath};
 use deltalake::protocol::SaveMode;
 use deltalake::DeltaTable;
 use deltalake::DeltaTableBuilder;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+async fn read_parquet_batches(
+    object_store: ObjectStoreRef,
+    path: &str,
+) -> Result<Vec<RecordBatch>> {
+    let object_path = ObjectPath::from(path);
+    let meta = object_store.get(&object_path).await?.bytes().await?;
+    let reader = deltalake::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(meta.clone())
+        .map_err(|e| StorageError::Other(e.into()))?
+        .build()
+        .map_err(|e| StorageError::Other(e.into()))?;
+    let mut batches = Vec::new();
+    for batch in reader {
+        batches.push(batch.map_err(|e| StorageError::Other(e.into()))?);
+    }
+    Ok(batches)
+}
 
 pub struct Lake {
     config: StorageConfig,
@@ -176,6 +196,52 @@ impl Lake {
     ) -> Result<Vec<HashMap<String, serde_json::Value>>> {
         log::warn!("get_in_edges is using mock data. For real data, query the graph engine.");
         Ok(vec![])
+    }
+
+    pub async fn read_changes_since(
+        &self,
+        table_name: &str,
+        start_version: i64,
+    ) -> Result<(Vec<(i64, Vec<RecordBatch>)>, i64)> {
+        let table_path = self.config.lake_path.join(table_name);
+        let table_uri = table_path
+            .to_str()
+            .ok_or_else(|| StorageError::Config(format!("Invalid table path {:?}", table_path)))?;
+
+        let mut table = DeltaTableBuilder::from_uri(table_uri).build()?;
+        table.load().await?;
+        let latest_version = table.version();
+
+        if latest_version <= start_version {
+            return Ok((Vec::new(), latest_version));
+        }
+
+        let log_store = table.log_store();
+
+        let mut changes = Vec::new();
+
+        for version in (start_version + 1)..=latest_version {
+            if let Some(bytes) = log_store.read_commit_entry(version).await? {
+                let mut version_batches = Vec::new();
+                for line in bytes.split(|b| *b == b'\n') {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let action: Action =
+                        serde_json::from_slice(line).map_err(|e| StorageError::Other(e.into()))?;
+                    if let Action::Add(add) = action {
+                        let file_path = add.path;
+                        let batches = read_parquet_batches(table.object_store(), &file_path).await?;
+                        version_batches.extend(batches);
+                    }
+                }
+                if !version_batches.is_empty() {
+                    changes.push((version, version_batches));
+                }
+            }
+        }
+
+        Ok((changes, latest_version))
     }
 
     /// 获取边数据统计信息
@@ -369,5 +435,66 @@ mod tests {
             arr.value(0) as u64
         };
         assert_eq!(count_value, 1);
+    }
+
+    #[tokio::test]
+    async fn test_read_changes_since() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig::new(dir.path());
+        let lake = Lake::new(config.clone()).await.unwrap();
+        let table_name = "silver/entities/nodes";
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+
+        let batch_v0 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![1])),
+                Arc::new(StringArray::from(vec!["alpha"])),
+            ],
+        )
+        .unwrap();
+
+        lake.write_batches(
+            table_name,
+            vec![batch_v0.clone()],
+            Some(vec!["id".to_string()]),
+        )
+        .await
+        .unwrap();
+
+        let (changes_v0, latest) = lake.read_changes_since(table_name, -1).await.unwrap();
+        assert_eq!(latest, 0);
+        assert_eq!(changes_v0.len(), 1);
+        assert_eq!(changes_v0[0].0, 0);
+        assert_eq!(changes_v0[0].1.len(), 1);
+        assert_eq!(changes_v0[0].1[0].num_rows(), 1);
+
+        let batch_v1 = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1])),
+                Arc::new(StringArray::from(vec!["beta"])),
+            ],
+        )
+        .unwrap();
+
+        lake.write_batches(
+            table_name,
+            vec![batch_v1],
+            Some(vec!["id".to_string()]),
+        )
+        .await
+        .unwrap();
+
+        let (changes_v1, latest_after) = lake.read_changes_since(table_name, 0).await.unwrap();
+        assert_eq!(latest_after, 1);
+        assert_eq!(changes_v1.len(), 1);
+        assert_eq!(changes_v1[0].0, 1);
+        assert_eq!(changes_v1[0].1.len(), 1);
+        assert_eq!(changes_v1[0].1[0].num_rows(), 1);
     }
 }

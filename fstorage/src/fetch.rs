@@ -3,9 +3,34 @@ use async_trait::async_trait;
 use deltalake::arrow::record_batch::RecordBatch;
 
 /// The category of an entity in the knowledge graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityCategory {
     Node,
     Edge,
+}
+
+impl EntityCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EntityCategory::Node => "node",
+            EntityCategory::Edge => "edge",
+        }
+    }
+}
+
+impl std::str::FromStr for EntityCategory {
+    type Err = crate::errors::StorageError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "node" | "Node" => Ok(EntityCategory::Node),
+            "edge" | "Edge" => Ok(EntityCategory::Edge),
+            other => Err(crate::errors::StorageError::InvalidArg(format!(
+                "Unknown entity category '{}'",
+                other
+            ))),
+        }
+    }
 }
 
 /// A trait for types that can be fetched from an external source and converted to a RecordBatch.

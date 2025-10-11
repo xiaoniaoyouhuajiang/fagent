@@ -52,3 +52,12 @@ pub struct TaskLog {
     pub status: String,
     pub details: String, // JSON string
 }
+
+#[derive(Debug, Clone)]
+pub struct IngestionOffset {
+    pub table_path: String,
+    pub entity_type: String,
+    pub category: crate::fetch::EntityCategory,
+    pub primary_keys: Vec<String>,
+    pub last_version: i64,
+}

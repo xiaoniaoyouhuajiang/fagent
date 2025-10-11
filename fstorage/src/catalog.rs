@@ -1,7 +1,9 @@
 use crate::config::StorageConfig;
 use crate::errors::Result;
-use crate::models::{ApiBudget, EntityReadiness};
+use crate::fetch::EntityCategory;
+use crate::models::{ApiBudget, EntityReadiness, IngestionOffset};
 use rusqlite::{params, Connection};
+use serde_json;
 use std::sync::{Arc, Mutex};
 
 pub struct Catalog {
@@ -39,6 +41,13 @@ impl Catalog {
                 end_time INTEGER,
                 status TEXT,
                 details TEXT
+            );
+            CREATE TABLE IF NOT EXISTS ingestion_offsets (
+                table_path TEXT PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                primary_keys TEXT NOT NULL,
+                last_version INTEGER NOT NULL DEFAULT -1
             );
             COMMIT;",
         )?;
@@ -136,6 +145,80 @@ impl Catalog {
         )?;
         Ok(())
     }
+
+    pub fn ensure_ingestion_offset(
+        &self,
+        table_path: &str,
+        entity_type: &str,
+        category: EntityCategory,
+        primary_keys: &[String],
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let pk_json = serde_json::to_string(primary_keys)?;
+        conn.execute(
+            "INSERT INTO ingestion_offsets (table_path, entity_type, category, primary_keys)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(table_path) DO UPDATE SET
+                entity_type = excluded.entity_type,
+                category = excluded.category,
+                primary_keys = excluded.primary_keys",
+            params![table_path, entity_type, category.as_str(), pk_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_ingestion_offset(&self, table_path: &str) -> Result<Option<IngestionOffset>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT table_path, entity_type, category, primary_keys, last_version
+             FROM ingestion_offsets WHERE table_path = ?1",
+        )?;
+        let mut rows = stmt.query(params![table_path])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::map_ingestion_offset_row(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_ingestion_offsets(&self) -> Result<Vec<IngestionOffset>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT table_path, entity_type, category, primary_keys, last_version FROM ingestion_offsets",
+        )?;
+        let mut results = Vec::new();
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            results.push(Self::map_ingestion_offset_row(row)?);
+        }
+        Ok(results)
+    }
+
+    pub fn update_ingestion_offset(&self, table_path: &str, last_version: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE ingestion_offsets SET last_version = ?1 WHERE table_path = ?2",
+            params![last_version, table_path],
+        )?;
+        Ok(())
+    }
+
+    fn map_ingestion_offset_row(row: &rusqlite::Row<'_>) -> Result<IngestionOffset> {
+        let table_path: String = row.get(0)?;
+        let entity_type: String = row.get(1)?;
+        let category_str: String = row.get(2)?;
+        let primary_keys_json: String = row.get(3)?;
+        let last_version: i64 = row.get(4)?;
+        let primary_keys: Vec<String> = serde_json::from_str(&primary_keys_json)?;
+        let category = category_str.parse()?;
+        Ok(IngestionOffset {
+            table_path,
+            entity_type,
+            category,
+            primary_keys,
+            last_version,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -203,5 +286,40 @@ mod tests {
         // Test update
         let result = catalog.update_task_log_status(task_id, "SUCCESS", "Done");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ingestion_offsets_crud() {
+        let (catalog, _dir) = setup();
+
+        let ensure = catalog.ensure_ingestion_offset(
+            "silver/entities/project",
+            "project",
+            crate::fetch::EntityCategory::Node,
+            &vec!["url".to_string()],
+        );
+        assert!(ensure.is_ok());
+
+        let offset = catalog
+            .get_ingestion_offset("silver/entities/project")
+            .unwrap()
+            .unwrap();
+        assert_eq!(offset.table_path, "silver/entities/project");
+        assert_eq!(offset.entity_type, "project");
+        assert_eq!(offset.category, crate::fetch::EntityCategory::Node);
+        assert_eq!(offset.primary_keys, vec!["url".to_string()]);
+        assert_eq!(offset.last_version, -1);
+
+        let list = catalog.list_ingestion_offsets().unwrap();
+        assert_eq!(list.len(), 1);
+
+        catalog
+            .update_ingestion_offset("silver/entities/project", 5)
+            .unwrap();
+        let updated = catalog
+            .get_ingestion_offset("silver/entities/project")
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.last_version, 5);
     }
 }

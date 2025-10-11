@@ -141,6 +141,22 @@ impl FStorageSynchronizer {
         batch: &RecordBatch,
     ) -> Result<()> {
         let entity_type = fetchable_collection.entity_type_any();
+        let category = fetchable_collection.category_any();
+        let primary_keys: Vec<String> = fetchable_collection
+            .primary_keys_any()
+            .into_iter()
+            .map(|k| k.to_string())
+            .collect();
+        self.update_engine_from_batch_with_meta(entity_type, category, &primary_keys, batch)
+    }
+
+    fn update_engine_from_batch_with_meta(
+        &self,
+        entity_type: &str,
+        category: crate::fetch::EntityCategory,
+        primary_keys: &[String],
+        batch: &RecordBatch,
+    ) -> Result<()> {
         log::info!(
             "Hot Path: Incrementally updating engine for entity type '{}' with {} records.",
             entity_type,
@@ -150,7 +166,7 @@ impl FStorageSynchronizer {
         let schema = batch.schema();
         let mut txn = self.engine.storage.graph_env.write_txn()?;
 
-        match fetchable_collection.category_any() {
+        match category {
             EntityCategory::Node => {
                 for i in 0..batch.num_rows() {
                     let mut properties = HashMap::new();
@@ -178,7 +194,6 @@ impl FStorageSynchronizer {
                             }
                         }
                     } else {
-                        let primary_keys = fetchable_collection.primary_keys_any();
                         if primary_keys.is_empty() {
                             log::warn!(
                                 "Skipping node of type '{}' at row {} due to missing 'id' and no primary keys defined.",
@@ -195,7 +210,7 @@ impl FStorageSynchronizer {
                                     let val = Self::arrow_value_to_helix_value(col, i)
                                         .map(|v| v.inner_stringify())
                                         .unwrap_or_default();
-                                    (*key, val)
+                                    (key.as_str(), val)
                                 })
                             })
                             .collect();
@@ -352,11 +367,17 @@ impl DataSynchronizer for FStorageSynchronizer {
             let merge_on = if merge_keys.is_empty() {
                 None
             } else {
-                Some(merge_keys)
+                Some(merge_keys.clone())
             };
             self.lake
                 .write_batches(&table_name, vec![record_batch.clone()], merge_on)
                 .await?;
+            self.catalog.ensure_ingestion_offset(
+                &table_name,
+                fetchable_collection.entity_type_any(),
+                fetchable_collection.category_any(),
+                &merge_keys,
+            )?;
 
             // Hot Path: Write to Graph Engine
             self.update_engine_from_batch(fetchable_collection, &record_batch)?;
@@ -448,11 +469,132 @@ impl DataSynchronizer for FStorageSynchronizer {
         let task_name = format!("full_etl_for_{}", target_repo_uri);
         let task_id = self.catalog.create_task_log(&task_name)?;
         log::info!("Starting ETL from Lake to Engine for {}", target_repo_uri);
+        let offsets = self.catalog.list_ingestion_offsets()?;
+        let mut processed_tables = 0usize;
+
+        for offset in offsets {
+            let (changes, latest_version) = self
+                .lake
+                .read_changes_since(&offset.table_path, offset.last_version)
+                .await?;
+            if changes.is_empty() {
+                continue;
+            }
+            let primary_keys = offset.primary_keys.clone();
+            for (version, batches) in changes {
+                for batch in batches {
+                    self.update_engine_from_batch_with_meta(
+                        &offset.entity_type,
+                        offset.category,
+                        &primary_keys,
+                        &batch,
+                    )?;
+                }
+                self.catalog
+                    .update_ingestion_offset(&offset.table_path, version)?;
+            }
+            if latest_version > offset.last_version {
+                processed_tables += 1;
+            }
+        }
+
+        let status_message = if processed_tables > 0 {
+            format!("Processed {} table(s) from lake.", processed_tables)
+        } else {
+            "No new lake updates to process.".to_string()
+        };
+
         self.catalog.update_task_log_status(
             task_id,
             "SUCCESS",
-            "ETL completed successfully (simulated).",
+            &status_message,
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::StorageConfig;
+    use crate::embedding::NullEmbeddingProvider;
+    use crate::fetch::Fetchable;
+    use crate::schemas::generated_schemas::Project;
+    use helix_db::helix_engine::traversal_core::HelixGraphEngineOpts;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_run_full_etl_updates_offsets() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig::new(dir.path());
+        tokio::fs::create_dir_all(&config.engine_path).await.unwrap();
+
+        let catalog = Arc::new(Catalog::new(&config).unwrap());
+        catalog.initialize_schema().unwrap();
+        let lake = Arc::new(Lake::new(config.clone()).await.unwrap());
+
+        let engine_opts = HelixGraphEngineOpts {
+            path: config.engine_path.to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+        let engine = Arc::new(HelixGraphEngine::new(engine_opts).unwrap());
+
+        let synchronizer = FStorageSynchronizer::new(
+            Arc::clone(&catalog),
+            Arc::clone(&lake),
+            Arc::clone(&engine),
+            Arc::new(NullEmbeddingProvider),
+        );
+
+        let mut graph_data = GraphData::new();
+        graph_data.add_entities(vec![Project {
+            url: Some("https://example.com/repo".to_string()),
+            name: Some("alpha".to_string()),
+            description: None,
+            language: None,
+            stars: None,
+            forks: None,
+        }]);
+
+        synchronizer.process_graph_data(graph_data).await.unwrap();
+
+        let offset = catalog
+            .get_ingestion_offset(&Project::table_name())
+            .unwrap()
+            .unwrap();
+        assert_eq!(offset.last_version, -1);
+
+        synchronizer
+            .run_full_etl_from_lake("test_repo")
+            .await
+            .unwrap();
+
+        let offset_after = catalog
+            .get_ingestion_offset(&Project::table_name())
+            .unwrap()
+            .unwrap();
+        assert_eq!(offset_after.last_version, 0);
+
+        let mut updated_data = GraphData::new();
+        updated_data.add_entities(vec![Project {
+            url: Some("https://example.com/repo".to_string()),
+            name: Some("beta".to_string()),
+            description: None,
+            language: None,
+            stars: Some(10),
+            forks: None,
+        }]);
+        synchronizer.process_graph_data(updated_data).await.unwrap();
+
+        synchronizer
+            .run_full_etl_from_lake("test_repo")
+            .await
+            .unwrap();
+
+        let offset_final = catalog
+            .get_ingestion_offset(&Project::table_name())
+            .unwrap()
+            .unwrap();
+        assert_eq!(offset_final.last_version, 1);
     }
 }

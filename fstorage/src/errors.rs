@@ -39,6 +39,9 @@ pub enum StorageError {
     #[error("Heed operation failed: {0}")]
     Heed(#[from] heed3::Error),
 
+    #[error("Object store operation failed: {0}")]
+    ObjectStore(#[from] deltalake::ObjectStoreError),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
