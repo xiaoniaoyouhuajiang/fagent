@@ -1,9 +1,13 @@
 use crate::config::StorageConfig;
 use crate::errors::{Result, StorageError};
 use deltalake::arrow::record_batch::RecordBatch;
+use deltalake::datafusion::datasource::MemTable;
+use deltalake::datafusion::execution::context::SessionContext;
+use deltalake::protocol::SaveMode;
 use deltalake::DeltaTable;
 use deltalake::DeltaTableBuilder;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub struct Lake {
     config: StorageConfig,
@@ -23,7 +27,12 @@ impl Lake {
         if let Some(parent) = table_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        tokio::fs::create_dir_all(&table_path).await?;
         
+        if let Some(parent) = table_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
         let table_uri = table_path
             .to_str()
             .ok_or_else(|| StorageError::Config(format!("Invalid table path {:?}", table_path)))?;
@@ -40,29 +49,87 @@ impl Lake {
         }
     }
 
-    /// 将RecordBatch写入指定的Delta Table，支持合并（merge）操作以保证幂等性。
+    /// 将RecordBatch写入指定的Delta Table，支持主键幂等写（基于 `merge_on`）。
     pub async fn write_batches(
         &self,
         table_name: &str,
         batches: Vec<RecordBatch>,
-        merge_on: Option<Vec<&str>>,
+        merge_on: Option<Vec<String>>,
     ) -> Result<()> {
         if batches.is_empty() {
             return Ok(());
         }
 
         let table_path = self.config.lake_path.join(table_name);
-        
-        // Use DeltaOps for writing with merge support
-        let ops = deltalake::DeltaOps::try_from_uri(table_path.to_str().unwrap()).await?;
-        
-        if let Some(_predicate) = merge_on {
-            // Note: In deltalake 0.17.0, merge operations are handled differently
-            // For now, we'll use simple append operations
-            // TODO: Implement proper merge logic when needed
+        let table_uri = table_path
+            .to_str()
+            .ok_or_else(|| StorageError::Config(format!("Invalid table path {:?}", table_path)))?;
+        let delta_log_path = table_path.join("_delta_log");
+        let table_exists = tokio::fs::metadata(&delta_log_path).await.is_ok();
+
+        if !table_exists {
+            let table_display_name = table_name.replace('/', "_");
+            deltalake::DeltaOps::try_from_uri(table_uri)
+                .await?
+                .write(batches.clone())
+                .with_save_mode(SaveMode::Overwrite)
+                .with_table_name(table_display_name)
+                .await?;
+            return Ok(());
         }
-        
-        ops.write(batches).await?;
+
+        if let Some(keys) = merge_on.clone() {
+            // If the table already exists, rewrite it with de-duplicated data using DataFusion.
+            match deltalake::open_table(table_uri).await {
+                Ok(existing_table) => {
+                    let schema = batches
+                        .get(0)
+                        .map(|b| b.schema())
+                        .ok_or_else(|| StorageError::InvalidArg("Missing batch schema".into()))?;
+
+                    let ctx = SessionContext::new();
+                    let mem_table = MemTable::try_new(schema.clone(), vec![batches.clone()])
+                        .map_err(|e| StorageError::Other(e.into()))?;
+                    ctx.register_table("new_data", Arc::new(mem_table))
+                        .map_err(|e| StorageError::Other(e.into()))?;
+
+                    let provider_table = existing_table.clone();
+                    ctx.register_table("existing", Arc::new(provider_table))
+                        .map_err(|e| StorageError::Other(e.into()))?;
+
+                    let key_list = keys
+                        .iter()
+                        .map(|k| format!("\"{}\"", k))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let sql = format!(
+                        "SELECT * FROM new_data UNION ALL SELECT existing.* FROM existing LEFT ANTI JOIN new_data USING ({})",
+                        key_list
+                    );
+
+                    let final_df = ctx.sql(&sql).await.map_err(|e| StorageError::Other(e.into()))?;
+                    let final_batches = final_df
+                        .collect()
+                        .await
+                        .map_err(|e| StorageError::Other(e.into()))?;
+
+                    deltalake::DeltaOps(existing_table)
+                        .write(final_batches)
+                        .with_save_mode(SaveMode::Overwrite)
+                        .await?;
+
+                    return Ok(());
+                }
+                Err(e) => {
+                    return Err(StorageError::from(e));
+                }
+            }
+        }
+
+        deltalake::DeltaOps::try_from_uri(table_uri)
+            .await?
+            .write(batches)
+            .await?;
 
         Ok(())
     }
@@ -82,7 +149,13 @@ impl Lake {
     ) -> Result<()> {
         let batch = T::to_record_batch(edges)?;
         let table_path = format!("silver/edges/{}", edge_type.to_lowercase());
-        self.write_batches(&table_path, vec![batch], None).await
+        let merge_keys: Vec<String> = T::primary_keys().into_iter().map(|k| k.to_string()).collect();
+        let merge_on = if merge_keys.is_empty() {
+            None
+        } else {
+            Some(merge_keys)
+        };
+        self.write_batches(&table_path, vec![batch], merge_on).await
     }
 
     // Note: These methods are left for API compatibility but should ideally query the hot path (HelixDB).
@@ -157,10 +230,9 @@ impl Lake {
 mod tests {
     use super::*;
     use crate::config::StorageConfig;
-    use deltalake::arrow::{
-        array::{Int32Array, StringArray},
-        datatypes::{DataType, Field, Schema},
-    };
+    use deltalake::arrow::array::{Int32Array, Int64Array, StringArray, UInt64Array};
+    use deltalake::arrow::datatypes::{DataType, Field, Schema};
+    use deltalake::datafusion::execution::context::SessionContext;
     use tempfile::tempdir;
     use std::sync::Arc;
 
@@ -197,5 +269,105 @@ mod tests {
             .unwrap();
         assert_eq!(table.version(), 0);
         assert_eq!(table.get_file_uris().into_iter().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_write_batches_upsert_by_primary_key() {
+        let dir = tempdir().unwrap();
+        let config = StorageConfig::new(dir.path());
+        let lake = Lake::new(config.clone()).await.unwrap();
+        let table_name = "silver/entities/projects";
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+
+        let initial_batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![1])),
+                Arc::new(StringArray::from(vec!["alpha"])),
+            ],
+        )
+        .unwrap();
+
+        lake.write_batches(
+            table_name,
+            vec![initial_batch.clone()],
+            Some(vec!["id".to_string()]),
+        )
+        .await
+        .unwrap();
+
+        // Update the row with the same primary key but different value.
+        let updated_batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![1])),
+                Arc::new(StringArray::from(vec!["beta"])),
+            ],
+        )
+        .unwrap();
+
+        lake.write_batches(
+            table_name,
+            vec![updated_batch.clone()],
+            Some(vec!["id".to_string()]),
+        )
+        .await
+        .unwrap();
+
+        let table_path = config.lake_path.join(table_name);
+        assert!(table_path.exists(), "Table path should exist after writes");
+        assert!(
+            table_path.join("_delta_log").exists(),
+            "Delta log directory should be created"
+        );
+        let table_uri = table_path.to_str().unwrap();
+        let final_table = deltalake::open_table(table_uri).await.unwrap();
+
+        let ctx = SessionContext::new();
+        ctx.register_table("projects", Arc::new(final_table.clone()))
+            .unwrap();
+
+        let df = ctx
+            .sql("SELECT id, name FROM projects ORDER BY id")
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 1);
+        let id_array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let name_array = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(id_array.value(0), 1);
+        assert_eq!(name_array.value(0), "beta");
+
+        // Ensure total row count is 1.
+        let count_df = ctx.sql("SELECT count(*) as cnt FROM projects").await.unwrap();
+        let count_batches = count_df.collect().await.unwrap();
+        let count_column = count_batches[0].column(0);
+        let count_value = if let Some(arr) = count_column
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+        {
+            arr.value(0)
+        } else {
+            let arr = count_column
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            arr.value(0) as u64
+        };
+        assert_eq!(count_value, 1);
     }
 }

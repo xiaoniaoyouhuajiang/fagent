@@ -344,8 +344,18 @@ impl DataSynchronizer for FStorageSynchronizer {
             
             // Cold Path: Write to Data Lake
             let table_name = fetchable_collection.table_name();
+            let merge_keys: Vec<String> = fetchable_collection
+                .primary_keys_any()
+                .into_iter()
+                .map(|k| k.to_string())
+                .collect();
+            let merge_on = if merge_keys.is_empty() {
+                None
+            } else {
+                Some(merge_keys)
+            };
             self.lake
-                .write_batches(&table_name, vec![record_batch.clone()], None)
+                .write_batches(&table_name, vec![record_batch.clone()], merge_on)
                 .await?;
 
             // Hot Path: Write to Graph Engine
