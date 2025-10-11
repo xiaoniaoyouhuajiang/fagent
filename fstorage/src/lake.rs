@@ -1,16 +1,30 @@
 use crate::config::StorageConfig;
 use crate::errors::{Result, StorageError};
+use deltalake::DeltaTable;
+use deltalake::DeltaTableBuilder;
+use deltalake::ObjectStore;
+use chrono::{DateTime, Utc};
+use deltalake::arrow::array::{
+    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
+    StringArray, TimestampMicrosecondArray, UInt32Array, UInt64Array,
+};
+use deltalake::arrow::datatypes::DataType;
 use deltalake::arrow::record_batch::RecordBatch;
 use deltalake::datafusion::datasource::MemTable;
 use deltalake::datafusion::execution::context::SessionContext;
 use deltalake::kernel::Action;
-use deltalake::ObjectStore;
-use deltalake::storage::{ObjectStoreRef, Path as ObjectPath};
 use deltalake::protocol::SaveMode;
-use deltalake::DeltaTable;
-use deltalake::DeltaTableBuilder;
+use deltalake::storage::{ObjectStoreRef, Path as ObjectPath};
+use helix_db::helix_engine::storage_core::HelixGraphStorage;
+use helix_db::helix_engine::storage_core::storage_methods::StorageMethods;
+use helix_db::helix_engine::traversal_core::HelixGraphEngine;
+use helix_db::helix_engine::types::GraphError;
+use helix_db::protocol::value::Value as HelixValue;
+use helix_db::utils::items::Edge;
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::Arc;
+use uuid::Uuid;
 
 async fn read_parquet_batches(
     object_store: ObjectStoreRef,
@@ -18,10 +32,12 @@ async fn read_parquet_batches(
 ) -> Result<Vec<RecordBatch>> {
     let object_path = ObjectPath::from(path);
     let meta = object_store.get(&object_path).await?.bytes().await?;
-    let reader = deltalake::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(meta.clone())
-        .map_err(|e| StorageError::Other(e.into()))?
-        .build()
-        .map_err(|e| StorageError::Other(e.into()))?;
+    let reader = deltalake::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+        meta.clone(),
+    )
+    .map_err(|e| StorageError::Other(e.into()))?
+    .build()
+    .map_err(|e| StorageError::Other(e.into()))?;
     let mut batches = Vec::new();
     for batch in reader {
         batches.push(batch.map_err(|e| StorageError::Other(e.into()))?);
@@ -30,25 +46,26 @@ async fn read_parquet_batches(
 }
 
 pub struct Lake {
-    config: StorageConfig,
+    pub(crate) config: StorageConfig,
+    engine: Arc<HelixGraphEngine>,
 }
 
 impl Lake {
-    pub async fn new(config: StorageConfig) -> Result<Self> {
+    pub async fn new(config: StorageConfig, engine: Arc<HelixGraphEngine>) -> Result<Self> {
         tokio::fs::create_dir_all(&config.lake_path).await?;
-        Ok(Self { config })
+        Ok(Self { config, engine })
     }
 
     // create delta table
     pub async fn get_or_create_table(&self, table_name: &str) -> Result<DeltaTable> {
         let table_path = self.config.lake_path.join(table_name);
-        
+
         // 确保父目录存在
         if let Some(parent) = table_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::create_dir_all(&table_path).await?;
-        
+
         if let Some(parent) = table_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -127,7 +144,10 @@ impl Lake {
                         key_list
                     );
 
-                    let final_df = ctx.sql(&sql).await.map_err(|e| StorageError::Other(e.into()))?;
+                    let final_df = ctx
+                        .sql(&sql)
+                        .await
+                        .map_err(|e| StorageError::Other(e.into()))?;
                     let final_batches = final_df
                         .collect()
                         .await
@@ -155,11 +175,11 @@ impl Lake {
     }
 
     /// 写入边数据到数据湖
-    /// 
+    ///
     /// # 参数
     /// * `edge_type` - 边类型名称（如 "HAS_VERSION", "CALLS" 等）
     /// * `edges` - 边数据向量，必须实现 Fetchable trait
-    /// 
+    ///
     /// # 返回
     /// * `Result<()>` - 操作结果
     pub async fn write_edges<T: crate::fetch::Fetchable>(
@@ -169,7 +189,10 @@ impl Lake {
     ) -> Result<()> {
         let batch = T::to_record_batch(edges)?;
         let table_path = format!("silver/edges/{}", edge_type.to_lowercase());
-        let merge_keys: Vec<String> = T::primary_keys().into_iter().map(|k| k.to_string()).collect();
+        let merge_keys: Vec<String> = T::primary_keys()
+            .into_iter()
+            .map(|k| k.to_string())
+            .collect();
         let merge_on = if merge_keys.is_empty() {
             None
         } else {
@@ -182,20 +205,20 @@ impl Lake {
     // The current implementation is a placeholder.
     pub async fn get_out_edges(
         &self,
-        _node_id: &str,
-        _edge_type: Option<&str>,
-    ) -> Result<Vec<HashMap<String, serde_json::Value>>> {
-        log::warn!("get_out_edges is using mock data. For real data, query the graph engine.");
-        Ok(vec![])
+        node_id: &str,
+        edge_type: Option<&str>,
+    ) -> Result<Vec<HashMap<String, JsonValue>>> {
+        self.get_adjacent_edges(node_id, edge_type, Direction::Out)
+            .await
     }
 
     pub async fn get_in_edges(
         &self,
-        _node_id: &str,
-        _edge_type: Option<&str>,
-    ) -> Result<Vec<HashMap<String, serde_json::Value>>> {
-        log::warn!("get_in_edges is using mock data. For real data, query the graph engine.");
-        Ok(vec![])
+        node_id: &str,
+        edge_type: Option<&str>,
+    ) -> Result<Vec<HashMap<String, JsonValue>>> {
+        self.get_adjacent_edges(node_id, edge_type, Direction::In)
+            .await
     }
 
     pub async fn read_changes_since(
@@ -231,7 +254,8 @@ impl Lake {
                         serde_json::from_slice(line).map_err(|e| StorageError::Other(e.into()))?;
                     if let Action::Add(add) = action {
                         let file_path = add.path;
-                        let batches = read_parquet_batches(table.object_store(), &file_path).await?;
+                        let batches =
+                            read_parquet_batches(table.object_store(), &file_path).await?;
                         version_batches.extend(batches);
                     }
                 }
@@ -243,39 +267,355 @@ impl Lake {
 
         Ok((changes, latest_version))
     }
+}
 
+#[derive(Clone, Copy)]
+enum Direction {
+    Out,
+    In,
+}
+
+impl Lake {
+    fn helix_value_to_json(value: &HelixValue) -> JsonValue {
+        match value {
+            HelixValue::String(s) => JsonValue::String(s.clone()),
+            HelixValue::F32(f) => serde_json::Number::from_f64(f64::from(*f))
+                .map(JsonValue::Number)
+                .unwrap_or_else(|| JsonValue::String(f.to_string())),
+            HelixValue::F64(f) => serde_json::Number::from_f64(*f)
+                .map(JsonValue::Number)
+                .unwrap_or_else(|| JsonValue::String(f.to_string())),
+            HelixValue::I8(v) => JsonValue::Number((*v).into()),
+            HelixValue::I16(v) => JsonValue::Number((*v).into()),
+            HelixValue::I32(v) => JsonValue::Number((*v).into()),
+            HelixValue::I64(v) => JsonValue::Number((*v).into()),
+            HelixValue::U8(v) => JsonValue::Number((*v).into()),
+            HelixValue::U16(v) => JsonValue::Number((*v).into()),
+            HelixValue::U32(v) => JsonValue::Number((*v).into()),
+            HelixValue::U64(v) => JsonValue::Number((*v).into()),
+            HelixValue::U128(v) => JsonValue::String(v.to_string()),
+            HelixValue::Date(d) => JsonValue::String(d.to_string()),
+            HelixValue::Boolean(b) => JsonValue::Bool(*b),
+            HelixValue::Id(id) => JsonValue::String(id.stringify()),
+            HelixValue::Array(values) => {
+                JsonValue::Array(values.iter().map(Self::helix_value_to_json).collect())
+            }
+            HelixValue::Object(map) => {
+                let mut json_map = JsonMap::new();
+                for (k, v) in map {
+                    json_map.insert(k.clone(), Self::helix_value_to_json(v));
+                }
+                JsonValue::Object(json_map)
+            }
+            HelixValue::Empty => JsonValue::Null,
+        }
+    }
+
+    fn edge_to_map(edge: Edge) -> HashMap<String, JsonValue> {
+        let mut result = HashMap::new();
+        result.insert(
+            "id".to_string(),
+            JsonValue::String(Uuid::from_u128(edge.id).to_string()),
+        );
+        result.insert("label".to_string(), JsonValue::String(edge.label.clone()));
+        result.insert(
+            "from_node_id".to_string(),
+            JsonValue::String(Uuid::from_u128(edge.from_node).to_string()),
+        );
+        result.insert(
+            "to_node_id".to_string(),
+            JsonValue::String(Uuid::from_u128(edge.to_node).to_string()),
+        );
+
+        match edge.properties {
+            Some(props) if !props.is_empty() => {
+                let mut json_map = JsonMap::new();
+                for (key, value) in props {
+                    json_map.insert(key, Self::helix_value_to_json(&value));
+                }
+                result.insert("properties".to_string(), JsonValue::Object(json_map));
+            }
+            _ => {
+                result.insert("properties".to_string(), JsonValue::Null);
+            }
+        }
+
+        result
+    }
+
+    async fn get_adjacent_edges(
+        &self,
+        node_id: &str,
+        edge_type: Option<&str>,
+        direction: Direction,
+    ) -> Result<Vec<HashMap<String, JsonValue>>> {
+        if let Ok(node_uuid) = Uuid::parse_str(node_id) {
+            match self
+                .get_adjacent_edges_from_helix(node_uuid.as_u128(), edge_type, direction)
+                .await
+            {
+                Ok(edges) if !edges.is_empty() => return Ok(edges),
+                Ok(_) => { /* Fall back to lake */ }
+                Err(StorageError::InvalidArg(_)) | Err(StorageError::NotFound(_)) => {
+                    // Node missing in Helix, fall back to lake
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        self.get_adjacent_edges_from_lake(node_id, edge_type, direction)
+            .await
+    }
+
+    async fn get_adjacent_edges_from_helix(
+        &self,
+        node_key: u128,
+        edge_type: Option<&str>,
+        direction: Direction,
+    ) -> Result<Vec<HashMap<String, JsonValue>>> {
+        let label_filter = edge_type.map(str::to_string);
+        let txn = self.engine.storage.graph_env.read_txn()?;
+
+        self.engine
+            .storage
+            .get_node(&txn, &node_key)
+            .map_err(|err| match err {
+                GraphError::NodeNotFound => StorageError::NotFound(format!(
+                    "Node '{}' was not found in Helix storage",
+                    Uuid::from_u128(node_key)
+                )),
+                other => StorageError::from(other),
+            })?;
+
+        let prefix = &node_key.to_be_bytes();
+        let iter = match direction {
+            Direction::Out => self.engine.storage.out_edges_db.prefix_iter(&txn, prefix)?,
+            Direction::In => self.engine.storage.in_edges_db.prefix_iter(&txn, prefix)?,
+        };
+
+        let mut edges = Vec::new();
+        for entry in iter {
+            let (_key, value) = entry?;
+            let (edge_id, other_node_id) =
+                HelixGraphStorage::unpack_adj_edge_data(value.as_ref())?;
+            let edge = self.engine.storage.get_edge(&txn, &edge_id)?;
+
+            let matches_direction = match direction {
+                Direction::Out => edge.from_node == node_key && edge.to_node == other_node_id,
+                Direction::In => edge.to_node == node_key && edge.from_node == other_node_id,
+            };
+            if !matches_direction {
+                continue;
+            }
+
+            if let Some(expected_label) = &label_filter {
+                if &edge.label != expected_label {
+                    continue;
+                }
+            }
+
+            edges.push(Self::edge_to_map(edge));
+        }
+
+        Ok(edges)
+    }
+
+    async fn get_adjacent_edges_from_lake(
+        &self,
+        node_id: &str,
+        edge_type: Option<&str>,
+        direction: Direction,
+    ) -> Result<Vec<HashMap<String, JsonValue>>> {
+        let edge_types = if let Some(et) = edge_type {
+            vec![et.to_string()]
+        } else {
+            self.get_available_edge_types().await?
+        };
+
+        let mut results = Vec::new();
+        for et in edge_types {
+            let table_path = self.config.lake_path.join(format!("silver/edges/{}", et));
+            if tokio::fs::metadata(&table_path).await.is_err() {
+                continue;
+            }
+
+            let table_uri = match table_path.to_str() {
+                Some(uri) => uri,
+                None => continue,
+            };
+
+            let table = match deltalake::open_table(table_uri).await {
+                Ok(table) => table,
+                Err(deltalake::DeltaTableError::NotATable(_)) => continue,
+                Err(e) => return Err(StorageError::from(e)),
+            };
+
+            let ctx = SessionContext::new();
+            let alias = format!("edges_{}", et.replace('-', "_"));
+            ctx.register_table(&alias, Arc::new(table))
+                .map_err(|e| StorageError::Other(e.into()))?;
+
+            let filter_column = match direction {
+                Direction::Out => "from_node_id",
+                Direction::In => "to_node_id",
+            };
+
+            let escaped_node_id = node_id.replace('\'', "''");
+            let sql = format!(
+                "SELECT * FROM {alias} WHERE {filter_column} = '{escaped_node_id}'",
+                alias = alias,
+                filter_column = filter_column,
+                escaped_node_id = escaped_node_id
+            );
+
+            let batches = ctx
+                .sql(&sql)
+                .await
+                .map_err(|e| StorageError::Other(e.into()))?
+                .collect()
+                .await
+                .map_err(|e| StorageError::Other(e.into()))?;
+
+            if batches.is_empty() {
+                continue;
+            }
+
+            let label = edge_type
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| et.clone())
+                .to_uppercase();
+            let mut mapped = Self::record_batches_to_edge_maps(&batches, &label)?;
+            results.append(&mut mapped);
+        }
+
+        Ok(results)
+    }
+
+    fn record_batches_to_edge_maps(
+        batches: &[RecordBatch],
+        label: &str,
+    ) -> Result<Vec<HashMap<String, JsonValue>>> {
+        let mut edges = Vec::new();
+        for batch in batches {
+            let schema = batch.schema();
+            for row in 0..batch.num_rows() {
+                let mut edge_map = HashMap::new();
+                let mut properties = JsonMap::new();
+
+                for (col_idx, field) in schema.fields().iter().enumerate() {
+                    let column = batch.column(col_idx);
+                    let value = if column.is_null(row) {
+                        JsonValue::Null
+                    } else {
+                        Self::arrow_cell_to_json(column, row).unwrap_or(JsonValue::Null)
+                    };
+
+                    match field.name().as_str() {
+                        "id" | "from_node_id" | "to_node_id" => {
+                            edge_map.insert(field.name().clone(), value);
+                        }
+                        _ => {
+                            if value != JsonValue::Null {
+                                properties.insert(field.name().clone(), value);
+                            }
+                        }
+                    }
+                }
+
+                edge_map.insert("label".to_string(), JsonValue::String(label.to_string()));
+                if properties.is_empty() {
+                    edge_map.insert("properties".to_string(), JsonValue::Null);
+                } else {
+                    edge_map.insert("properties".to_string(), JsonValue::Object(properties));
+                }
+                edges.push(edge_map);
+            }
+        }
+        Ok(edges)
+    }
+
+    fn arrow_cell_to_json(column: &ArrayRef, row_idx: usize) -> Option<JsonValue> {
+        match column.data_type() {
+            DataType::Utf8 => {
+                let arr = column.as_any().downcast_ref::<StringArray>()?;
+                Some(JsonValue::String(arr.value(row_idx).to_string()))
+            }
+            DataType::Int64 => {
+                let arr = column.as_any().downcast_ref::<Int64Array>()?;
+                Some(JsonValue::Number(arr.value(row_idx).into()))
+            }
+            DataType::Int32 => {
+                let arr = column.as_any().downcast_ref::<Int32Array>()?;
+                Some(JsonValue::Number(arr.value(row_idx).into()))
+            }
+            DataType::UInt64 => {
+                let arr = column.as_any().downcast_ref::<UInt64Array>()?;
+                Some(JsonValue::Number(arr.value(row_idx).into()))
+            }
+            DataType::UInt32 => {
+                let arr = column.as_any().downcast_ref::<UInt32Array>()?;
+                Some(JsonValue::Number(arr.value(row_idx).into()))
+            }
+            DataType::Float64 => {
+                let arr = column.as_any().downcast_ref::<Float64Array>()?;
+                serde_json::Number::from_f64(arr.value(row_idx))
+                    .map(JsonValue::Number)
+            }
+            DataType::Float32 => {
+                let arr = column.as_any().downcast_ref::<Float32Array>()?;
+                serde_json::Number::from_f64(arr.value(row_idx) as f64).map(JsonValue::Number)
+            }
+            DataType::Boolean => {
+                let arr = column.as_any().downcast_ref::<BooleanArray>()?;
+                Some(JsonValue::Bool(arr.value(row_idx)))
+            }
+            DataType::Timestamp(deltalake::arrow::datatypes::TimeUnit::Microsecond, _) => {
+                let arr = column
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()?;
+                let micros = arr.value(row_idx);
+                DateTime::<Utc>::from_timestamp_micros(micros)
+                    .map(|dt| JsonValue::String(dt.to_rfc3339()))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Lake {
     /// 获取边数据统计信息
-    /// 
+    ///
     /// # 返回
     /// * `Result<HashMap<String, i64>>` - 边类型到数量的映射
     pub async fn get_edge_statistics(&self) -> Result<HashMap<String, i64>> {
         let mut stats = HashMap::new();
-        
+
         // 获取所有可用的边类型
         let edge_types = self.get_available_edge_types().await.unwrap_or_default();
-        
+
         for et in edge_types {
             let table_path = format!("silver/edges/{}", et);
-            if let Ok(table) = deltalake::open_table(
-                self.config.lake_path.join(&table_path).to_str().unwrap()
-            ).await {
+            if let Ok(table) =
+                deltalake::open_table(self.config.lake_path.join(&table_path).to_str().unwrap())
+                    .await
+            {
                 // 使用表的版本数量估算记录数（简化实现）
                 let file_count = table.version() as i64;
                 stats.insert(et, file_count);
             }
         }
-        
+
         Ok(stats)
     }
 
     /// 获取所有可用的边类型
-    /// 
+    ///
     /// # 返回
     /// * `Result<Vec<String>>` - 边类型列表
     async fn get_available_edge_types(&self) -> Result<Vec<String>> {
         let edges_path = self.config.lake_path.join("silver/edges");
         let mut edge_types = Vec::new();
-        
+
         if tokio::fs::metadata(&edges_path).await.is_ok() {
             let mut entries = tokio::fs::read_dir(&edges_path).await?;
             while let Some(entry) = entries.next_entry().await? {
@@ -287,7 +627,7 @@ impl Lake {
                 }
             }
         }
-        
+
         Ok(edge_types)
     }
 }
@@ -299,14 +639,31 @@ mod tests {
     use deltalake::arrow::array::{Int32Array, Int64Array, StringArray, UInt64Array};
     use deltalake::arrow::datatypes::{DataType, Field, Schema};
     use deltalake::datafusion::execution::context::SessionContext;
-    use tempfile::tempdir;
+    use helix_db::helix_engine::traversal_core::{HelixGraphEngine, HelixGraphEngineOpts};
     use std::sync::Arc;
+    use tempfile::tempdir;
+
+    async fn create_lake(config: &StorageConfig) -> Lake {
+        tokio::fs::create_dir_all(&config.engine_path)
+            .await
+            .unwrap();
+        let engine_opts = HelixGraphEngineOpts {
+            path: config
+                .engine_path
+                .to_str()
+                .expect("Engine path not valid UTF-8")
+                .to_string(),
+            ..Default::default()
+        };
+        let engine = Arc::new(HelixGraphEngine::new(engine_opts).unwrap());
+        Lake::new(config.clone(), engine).await.unwrap()
+    }
 
     #[tokio::test]
     async fn test_write_and_read_delta_table() {
         let dir = tempdir().unwrap();
         let config = StorageConfig::new(dir.path());
-        let lake = Lake::new(config.clone()).await.unwrap();
+        let lake = create_lake(&config).await;
         let table_name = "test_table";
 
         // 定义Schema
@@ -341,7 +698,7 @@ mod tests {
     async fn test_write_batches_upsert_by_primary_key() {
         let dir = tempdir().unwrap();
         let config = StorageConfig::new(dir.path());
-        let lake = Lake::new(config.clone()).await.unwrap();
+        let lake = create_lake(&config).await;
         let table_name = "silver/entities/projects";
 
         let schema = Arc::new(Schema::new(vec![
@@ -419,19 +776,16 @@ mod tests {
         assert_eq!(name_array.value(0), "beta");
 
         // Ensure total row count is 1.
-        let count_df = ctx.sql("SELECT count(*) as cnt FROM projects").await.unwrap();
+        let count_df = ctx
+            .sql("SELECT count(*) as cnt FROM projects")
+            .await
+            .unwrap();
         let count_batches = count_df.collect().await.unwrap();
         let count_column = count_batches[0].column(0);
-        let count_value = if let Some(arr) = count_column
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-        {
+        let count_value = if let Some(arr) = count_column.as_any().downcast_ref::<UInt64Array>() {
             arr.value(0)
         } else {
-            let arr = count_column
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap();
+            let arr = count_column.as_any().downcast_ref::<Int64Array>().unwrap();
             arr.value(0) as u64
         };
         assert_eq!(count_value, 1);
@@ -441,7 +795,7 @@ mod tests {
     async fn test_read_changes_since() {
         let dir = tempdir().unwrap();
         let config = StorageConfig::new(dir.path());
-        let lake = Lake::new(config.clone()).await.unwrap();
+        let lake = create_lake(&config).await;
         let table_name = "silver/entities/nodes";
 
         let schema = Arc::new(Schema::new(vec![
@@ -482,13 +836,9 @@ mod tests {
         )
         .unwrap();
 
-        lake.write_batches(
-            table_name,
-            vec![batch_v1],
-            Some(vec!["id".to_string()]),
-        )
-        .await
-        .unwrap();
+        lake.write_batches(table_name, vec![batch_v1], Some(vec!["id".to_string()]))
+            .await
+            .unwrap();
 
         let (changes_v1, latest_after) = lake.read_changes_since(table_name, 0).await.unwrap();
         assert_eq!(latest_after, 1);

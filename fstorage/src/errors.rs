@@ -20,7 +20,6 @@ pub enum StorageError {
     #[error("Arrow operation failed: {0}")]
     Arrow(#[from] deltalake::arrow::error::ArrowError),
 
-    
     #[error("Configuration error: {0}")]
     Config(String),
 
@@ -45,6 +44,5 @@ pub enum StorageError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
-
 
 pub type Result<T> = std::result::Result<T, StorageError>;

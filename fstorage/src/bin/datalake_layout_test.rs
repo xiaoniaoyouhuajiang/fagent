@@ -1,30 +1,35 @@
-use fstorage::{FStorage, config::StorageConfig, schemas::generated_schemas::{Project, Developer, Commit, Version, Issue}, fetch::Fetchable};
-use tempfile::tempdir;
 use chrono::Utc;
+use fstorage::{
+    FStorage,
+    config::StorageConfig,
+    fetch::Fetchable,
+    schemas::generated_schemas::{Commit, Developer, Issue, Project, Version},
+};
+use tempfile::tempdir;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🏗️  Testing Schema-based DataLake Layout Creation");
     println!("================================================\n");
-    
+
     // Create a temporary directory for testing
     let dir = tempdir()?;
     let config = StorageConfig::new(dir.path());
-    
+
     println!("📁 Base directory: {:?}", dir.path());
-    
+
     // Initialize FStorage
     let storage = FStorage::new(config.clone()).await?;
-    
+
     println!("✅ FStorage initialized");
-    
+
     // Check initial directory structure
     println!("\n📂 Initial directory structure:");
     print_dir_structure(dir.path())?;
-    
+
     // Test creating Delta tables for each schema entity type
     println!("\n🚀 Creating schema-based Delta tables...");
-    
+
     let sample_projects = vec![
         Project {
             url: Some("https://github.com/example/repo1".to_string()),
@@ -88,48 +93,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .write_batches(&Commit::table_name(), vec![commits_batch], None)
         .await?;
 
-    let sample_versions = vec![
-        Version {
-            sha: Some("a1b2c3d4".to_string()),
-            tag: Some("v1.0.0".to_string()),
-            is_head: Some(false),
-            created_at: Some(Utc::now()),
-        },
-    ];
+    let sample_versions = vec![Version {
+        sha: Some("a1b2c3d4".to_string()),
+        tag: Some("v1.0.0".to_string()),
+        is_head: Some(false),
+        created_at: Some(Utc::now()),
+    }];
     let versions_batch = Version::to_record_batch(sample_versions)?;
     storage
         .lake
         .write_batches(&Version::table_name(), vec![versions_batch], None)
         .await?;
 
-    let sample_issues = vec![
-        Issue {
-            number: Some(1),
-            title: Some("Bug in feature Y".to_string()),
-            state: Some("open".to_string()),
-            created_at: Some(Utc::now()),
-        },
-    ];
+    let sample_issues = vec![Issue {
+        number: Some(1),
+        title: Some("Bug in feature Y".to_string()),
+        state: Some("open".to_string()),
+        created_at: Some(Utc::now()),
+    }];
     let issues_batch = Issue::to_record_batch(sample_issues)?;
     storage
         .lake
         .write_batches(&Issue::table_name(), vec![issues_batch], None)
         .await?;
-    
+
     // Check final directory structure
     println!("\n📂 Final DataLake directory structure:");
     print_dir_structure(dir.path())?;
-    
+
     // Verify Delta tables were created
     println!("\n✅ Delta Table Verification:");
     verify_delta_tables(&storage).await?;
-    
+
     println!("\n🎯 Schema-based DataLake Layout Summary:");
     println!("============================================");
     println!("✅ Lake path: {:?}", config.lake_path);
     println!("✅ Bronze layer: {}/bronze/", config.lake_path.display());
     println!("✅ Silver layer: {}/silver/", config.lake_path.display());
-    println!("✅ Entity tables: {}/silver/entities/", config.lake_path.display());
+    println!(
+        "✅ Entity tables: {}/silver/entities/",
+        config.lake_path.display()
+    );
     println!(
         "✅ PROJECT table: {}/{}/",
         config.lake_path.display(),
@@ -156,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Issue::table_name()
     );
     println!("✅ Total entities tested: 5 types");
-    
+
     Ok(())
 }
 
@@ -167,23 +171,23 @@ fn print_dir_structure(path: &std::path::Path) -> std::io::Result<()> {
             .into_iter()
             .collect::<Vec<_>>();
         entries.sort_by_key(|e| e.path());
-        
+
         for (i, entry) in entries.iter().enumerate() {
             let path = entry.path();
             let filename = path.file_name().unwrap().to_string_lossy();
             let is_last = i == entries.len() - 1;
             let current_prefix = if is_last { "└── " } else { "├── " };
             let next_prefix = if is_last { "    " } else { "│   " };
-            
+
             println!("{}{}{}", prefix, current_prefix, filename);
-            
+
             if path.is_dir() {
                 visit_dir(&path, &(prefix.to_string() + next_prefix))?;
             }
         }
         Ok(())
     }
-    
+
     let display_path = path.file_name().unwrap_or_else(|| path.as_os_str());
     println!("{}", display_path.to_string_lossy());
     visit_dir(path, "")
@@ -191,7 +195,7 @@ fn print_dir_structure(path: &std::path::Path) -> std::io::Result<()> {
 
 async fn verify_delta_tables(storage: &FStorage) -> Result<(), Box<dyn std::error::Error>> {
     let base_path = &storage.config.lake_path;
-    
+
     let tables_to_check = vec![
         ("PROJECT", Project::table_name()),
         ("DEVELOPER", Developer::table_name()),
@@ -199,19 +203,21 @@ async fn verify_delta_tables(storage: &FStorage) -> Result<(), Box<dyn std::erro
         ("VERSION", Version::table_name()),
         ("ISSUE", Issue::table_name()),
     ];
-    
+
     for (table_name, table_path) in tables_to_check {
         let table_uri = base_path.join(&table_path).to_string_lossy().to_string();
         match deltalake::open_table(&table_uri).await {
             Ok(table) => {
-                println!("  ✅ {} table: {} files, version {}", 
+                println!(
+                    "  ✅ {} table: {} files, version {}",
                     table_name,
-                    table.get_file_uris().into_iter().count(), 
-                    table.version());
+                    table.get_file_uris().into_iter().count(),
+                    table.version()
+                );
             }
             Err(e) => println!("  ❌ {} table: {}", table_name, e),
         }
     }
-    
+
     Ok(())
 }

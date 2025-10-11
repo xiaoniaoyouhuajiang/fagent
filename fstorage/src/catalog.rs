@@ -2,7 +2,7 @@ use crate::config::StorageConfig;
 use crate::errors::Result;
 use crate::fetch::EntityCategory;
 use crate::models::{ApiBudget, EntityReadiness, IngestionOffset};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde_json;
 use std::sync::{Arc, Mutex};
 

@@ -70,17 +70,19 @@ impl EmbeddingProvider for OpenAIProvider {
             .map_err(|e| StorageError::SyncError(format!("OpenAI API request failed: {}", e)))?;
 
         if !response.status().is_success() {
-            let error_body = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(StorageError::SyncError(format!(
                 "OpenAI API returned an error: {}",
                 error_body
             )));
         }
 
-        let openai_response = response
-            .json::<OpenAIResponse>()
-            .await
-            .map_err(|e| StorageError::SyncError(format!("Failed to parse OpenAI response: {}", e)))?;
+        let openai_response = response.json::<OpenAIResponse>().await.map_err(|e| {
+            StorageError::SyncError(format!("Failed to parse OpenAI response: {}", e))
+        })?;
 
         let embeddings = openai_response
             .data

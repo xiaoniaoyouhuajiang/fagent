@@ -2,8 +2,8 @@ use crate::catalog::Catalog;
 use crate::errors::{Result, StorageError};
 use crate::fetch::{EntityCategory, FetchResponse, Fetcher, GraphData};
 use crate::lake::Lake;
+use crate::models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext};
 use crate::utils;
-use crate::models::{EntityIdentifier, ReadinessReport, SyncContext, SyncBudget};
 use async_trait::async_trait;
 use bincode;
 use deltalake::arrow::record_batch::RecordBatch;
@@ -12,12 +12,12 @@ use helix_db::{
         bm25::bm25::{BM25, BM25Flatten},
         storage_core::storage_methods::StorageMethods,
         traversal_core::{
+            HelixGraphEngine,
             ops::{
                 g::G,
                 source::{e_from_id::EFromIdAdapter, n_from_id::NFromIdAdapter},
                 util::update::UpdateAdapter,
             },
-            HelixGraphEngine,
         },
     },
     protocol::value::Value,
@@ -220,11 +220,17 @@ impl FStorageSynchronizer {
 
                     if self.engine.storage.get_node(&txn, &id_u128).is_ok() {
                         let props_vec: Vec<(String, Value)> = properties.into_iter().collect();
-                        let traversal = G::new(self.engine.storage.clone(), &txn).n_from_id(&id_u128).collect_to::<Vec<_>>();
+                        let traversal = G::new(self.engine.storage.clone(), &txn)
+                            .n_from_id(&id_u128)
+                            .collect_to::<Vec<_>>();
                         G::new_mut_from(self.engine.storage.clone(), &mut txn, traversal)
                             .update(Some(props_vec))
                             .for_each(|_| {});
-                        log::debug!("Updating node: {} ({})", Uuid::from_u128(id_u128).to_string(), entity_type);
+                        log::debug!(
+                            "Updating node: {} ({})",
+                            Uuid::from_u128(id_u128).to_string(),
+                            entity_type
+                        );
                     } else {
                         let node = Node {
                             id: id_u128,
@@ -234,12 +240,16 @@ impl FStorageSynchronizer {
                         };
 
                         let bytes = node.encode_node()?;
-                        self.engine.storage.nodes_db.put(&mut txn, &id_u128, &bytes)?;
+                        self.engine
+                            .storage
+                            .nodes_db
+                            .put(&mut txn, &id_u128, &bytes)?;
 
                         if let Some(props) = &node.properties {
                             for (key, value) in props {
                                 if let Some(db) = self.engine.storage.secondary_indices.get(key) {
-                                    let value_bytes = bincode::serialize(value).map_err(|e| StorageError::SyncError(e.to_string()))?;
+                                    let value_bytes = bincode::serialize(value)
+                                        .map_err(|e| StorageError::SyncError(e.to_string()))?;
                                     db.put(&mut txn, &value_bytes, &node.id)?;
                                 }
                             }
@@ -249,7 +259,11 @@ impl FStorageSynchronizer {
                                 bm25.insert_doc(&mut txn, node.id, &data)?;
                             }
                         }
-                        log::debug!("Inserting node: {} ({})", Uuid::from_u128(id_u128).to_string(), entity_type);
+                        log::debug!(
+                            "Inserting node: {} ({})",
+                            Uuid::from_u128(id_u128).to_string(),
+                            entity_type
+                        );
                     }
                 }
             }
@@ -273,13 +287,18 @@ impl FStorageSynchronizer {
                         }
                     }
 
-                    let (from_str, to_str) =
-                        if let (Some(from), Some(to)) = (from_node_id_str.clone(), to_node_id_str.clone()) {
-                            (from, to)
-                        } else {
-                            log::warn!("Skipping edge of type '{}' at row {} due to missing from_node_id or to_node_id", entity_type, i);
-                            continue;
-                        };
+                    let (from_str, to_str) = if let (Some(from), Some(to)) =
+                        (from_node_id_str.clone(), to_node_id_str.clone())
+                    {
+                        (from, to)
+                    } else {
+                        log::warn!(
+                            "Skipping edge of type '{}' at row {} due to missing from_node_id or to_node_id",
+                            entity_type,
+                            i
+                        );
+                        continue;
+                    };
 
                     let id_u128 = if let Some(id_str) = edge_id_str.clone() {
                         match Uuid::parse_str(&id_str) {
@@ -310,11 +329,17 @@ impl FStorageSynchronizer {
 
                     if self.engine.storage.get_edge(&txn, &id_u128).is_ok() {
                         let props_vec: Vec<(String, Value)> = properties.into_iter().collect();
-                        let traversal = G::new(self.engine.storage.clone(), &txn).e_from_id(&id_u128).collect_to::<Vec<_>>();
+                        let traversal = G::new(self.engine.storage.clone(), &txn)
+                            .e_from_id(&id_u128)
+                            .collect_to::<Vec<_>>();
                         G::new_mut_from(self.engine.storage.clone(), &mut txn, traversal)
                             .update(Some(props_vec))
                             .for_each(|_| {});
-                        log::debug!("Updating edge: {} ({})", Uuid::from_u128(id_u128).to_string(), entity_type);
+                        log::debug!(
+                            "Updating edge: {} ({})",
+                            Uuid::from_u128(id_u128).to_string(),
+                            entity_type
+                        );
                     } else {
                         let edge = Edge {
                             id: id_u128,
@@ -326,7 +351,10 @@ impl FStorageSynchronizer {
                         };
 
                         let bytes = edge.encode_edge()?;
-                        self.engine.storage.edges_db.put(&mut txn, &id_u128, &bytes)?;
+                        self.engine
+                            .storage
+                            .edges_db
+                            .put(&mut txn, &id_u128, &bytes)?;
 
                         let label_hash = hash_label(&edge.label, None);
                         self.engine.storage.out_edges_db.put(
@@ -339,7 +367,11 @@ impl FStorageSynchronizer {
                             &helix_db::helix_engine::storage_core::HelixGraphStorage::in_edge_key(&edge.to_node, &label_hash),
                             &helix_db::helix_engine::storage_core::HelixGraphStorage::pack_edge_data(&edge.id, &edge.from_node),
                         )?;
-                        log::debug!("Inserting edge: {} ({})", Uuid::from_u128(id_u128).to_string(), entity_type);
+                        log::debug!(
+                            "Inserting edge: {} ({})",
+                            Uuid::from_u128(id_u128).to_string(),
+                            entity_type
+                        );
                     }
                 }
             }
@@ -356,7 +388,7 @@ impl DataSynchronizer for FStorageSynchronizer {
         // --- STAGE 2: Persistence - Process all entities (original and newly created) ---
         for fetchable_collection in graph_data.entities {
             let record_batch = fetchable_collection.to_record_batch_any()?;
-            
+
             // Cold Path: Write to Data Lake
             let table_name = fetchable_collection.table_name();
             let merge_keys: Vec<String> = fetchable_collection
@@ -433,9 +465,11 @@ impl DataSynchronizer for FStorageSynchronizer {
         let fetcher = self.fetchers.get(fetcher_name).ok_or_else(|| {
             StorageError::Config(format!("Fetcher '{}' not registered.", fetcher_name))
         })?;
-        
+
         // The fetcher is now responsible for all transformation, including vectorization.
-        let response = fetcher.fetch(params, self.embedding_provider.clone()).await?;
+        let response = fetcher
+            .fetch(params, self.embedding_provider.clone())
+            .await?;
 
         match response {
             FetchResponse::GraphData(graph_data) => {
@@ -443,7 +477,9 @@ impl DataSynchronizer for FStorageSynchronizer {
             }
             FetchResponse::PanelData { table_name, batch } => {
                 log::info!("Cold Path: Writing panel data to table '{}'", &table_name);
-                self.lake.write_batches(&table_name, vec![batch], None).await?;
+                self.lake
+                    .write_batches(&table_name, vec![batch], None)
+                    .await?;
             }
         }
 
@@ -504,11 +540,8 @@ impl DataSynchronizer for FStorageSynchronizer {
             "No new lake updates to process.".to_string()
         };
 
-        self.catalog.update_task_log_status(
-            task_id,
-            "SUCCESS",
-            &status_message,
-        )?;
+        self.catalog
+            .update_task_log_status(task_id, "SUCCESS", &status_message)?;
         Ok(())
     }
 }
@@ -527,17 +560,23 @@ mod tests {
     async fn test_run_full_etl_updates_offsets() {
         let dir = tempdir().unwrap();
         let config = StorageConfig::new(dir.path());
-        tokio::fs::create_dir_all(&config.engine_path).await.unwrap();
+        tokio::fs::create_dir_all(&config.engine_path)
+            .await
+            .unwrap();
 
         let catalog = Arc::new(Catalog::new(&config).unwrap());
         catalog.initialize_schema().unwrap();
-        let lake = Arc::new(Lake::new(config.clone()).await.unwrap());
 
         let engine_opts = HelixGraphEngineOpts {
             path: config.engine_path.to_str().unwrap().to_string(),
             ..Default::default()
         };
         let engine = Arc::new(HelixGraphEngine::new(engine_opts).unwrap());
+        let lake = Arc::new(
+            Lake::new(config.clone(), Arc::clone(&engine))
+                .await
+                .unwrap(),
+        );
 
         let synchronizer = FStorageSynchronizer::new(
             Arc::clone(&catalog),

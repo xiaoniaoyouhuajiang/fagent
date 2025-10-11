@@ -65,7 +65,7 @@ pub fn get_scalar_value(column: &dyn Array, row_idx: usize) -> Option<serde_json
     if column.is_null(row_idx) {
         return None;
     }
-    
+
     let data_type = column.data_type();
     let value = match data_type {
         DataType::Utf8 => {
@@ -117,12 +117,14 @@ pub fn get_scalar_value(column: &dyn Array, row_idx: usize) -> Option<serde_json
             array.value(row_idx).into()
         }
         DataType::Timestamp(deltalake::arrow::datatypes::TimeUnit::Microsecond, _) => {
-            let array = column.as_any().downcast_ref::<TimestampMicrosecondArray>()?;
+            let array = column
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()?;
             array.value(row_idx).to_string().into()
         }
         _ => serde_json::Value::Null,
     };
-    
+
     Some(value)
 }
 
@@ -142,10 +144,12 @@ impl ToArrowArray for Vec<i64> {
     fn to_arrow_array(values: Vec<Option<Self>>) -> Arc<dyn Array> {
         let json_strings: Vec<Option<String>> = values
             .into_iter()
-            .map(|vec| vec.map(|v| {
-                let string_vec: Vec<String> = v.iter().map(|i| i.to_string()).collect();
-                format!("[{}]", string_vec.join(", "))
-            }))
+            .map(|vec| {
+                vec.map(|v| {
+                    let string_vec: Vec<String> = v.iter().map(|i| i.to_string()).collect();
+                    format!("[{}]", string_vec.join(", "))
+                })
+            })
             .collect();
         StringArray::from(json_strings).into_arc()
     }

@@ -116,5 +116,9 @@ use std::sync::Arc;
 #[async_trait]
 pub trait Fetcher: Send + Sync {
     fn name(&self) -> &'static str;
-    async fn fetch(&self, params: serde_json::Value, embedding_provider: Arc<dyn EmbeddingProvider>) -> Result<FetchResponse>;
+    async fn fetch(
+        &self,
+        params: serde_json::Value,
+        embedding_provider: Arc<dyn EmbeddingProvider>,
+    ) -> Result<FetchResponse>;
 }

@@ -12,13 +12,13 @@ pub mod utils;
 
 use crate::catalog::Catalog;
 use crate::config::StorageConfig;
+use crate::embedding::{EmbeddingProvider, NullEmbeddingProvider, OpenAIProvider};
 use crate::errors::Result;
 use crate::fetch::Fetcher;
 use crate::lake::Lake;
 use crate::sync::{DataSynchronizer, FStorageSynchronizer};
 use helix_db::helix_engine::traversal_core::{HelixGraphEngine, HelixGraphEngineOpts};
 use std::sync::{Arc, Mutex};
-use crate::embedding::{EmbeddingProvider, OpenAIProvider, NullEmbeddingProvider};
 
 /// The main entry point for the `fstorage` library.
 ///
@@ -43,24 +43,35 @@ impl FStorage {
         let catalog = Arc::new(Catalog::new(&config)?);
         catalog.initialize_schema()?;
 
-        let lake = Arc::new(Lake::new(config.clone()).await?);
-
+        let engine_path = config
+            .engine_path
+            .to_str()
+            .ok_or_else(|| crate::errors::StorageError::Config("Non-UTF8 engine path".into()))?
+            .to_string();
         let engine_opts = HelixGraphEngineOpts {
-            path: config.engine_path.to_str().unwrap().to_string(),
+            path: engine_path,
             ..Default::default()
         };
         let engine = Arc::new(HelixGraphEngine::new(engine_opts)?);
 
+        let lake = Arc::new(Lake::new(config.clone(), Arc::clone(&engine)).await?);
+
         // Initialize the embedding provider
-        let embedding_model = engine.storage.storage_config.embedding_model.clone().unwrap_or_else(|| "text-embedding-ada-002".to_string());
+        let embedding_model = engine
+            .storage
+            .storage_config
+            .embedding_model
+            .clone()
+            .unwrap_or_else(|| "text-embedding-ada-002".to_string());
         let embedding_provider: Arc<dyn EmbeddingProvider> = match std::env::var("OPENAI_API_KEY") {
             Ok(key) => Arc::new(OpenAIProvider::new(embedding_model, key)),
             Err(_) => {
-                log::warn!("OPENAI_API_KEY not found, using NullEmbeddingProvider. Vector embeddings will be empty.");
+                log::warn!(
+                    "OPENAI_API_KEY not found, using NullEmbeddingProvider. Vector embeddings will be empty."
+                );
                 Arc::new(NullEmbeddingProvider)
             }
         };
-
 
         let synchronizer = Arc::new(Mutex::new(FStorageSynchronizer::new(
             Arc::clone(&catalog),

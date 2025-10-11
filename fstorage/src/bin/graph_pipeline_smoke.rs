@@ -11,10 +11,10 @@ use fstorage::{
     sync::{DataSynchronizer, FStorageSynchronizer},
     utils,
 };
-use helix_db::helix_engine::traversal_core::{HelixGraphEngine, HelixGraphEngineOpts};
 use helix_db::helix_engine::storage_core::storage_methods::StorageMethods;
-use uuid::Uuid;
+use helix_db::helix_engine::traversal_core::{HelixGraphEngine, HelixGraphEngineOpts};
 use tempfile::tempdir;
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,8 +31,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let catalog = Arc::new(Catalog::new(&config)?);
     catalog.initialize_schema()?;
 
-    let lake = Arc::new(Lake::new(config.clone()).await?);
-
     let engine_opts = HelixGraphEngineOpts {
         path: config
             .engine_path
@@ -42,6 +40,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
     let engine = Arc::new(HelixGraphEngine::new(engine_opts)?);
+
+    let lake = Arc::new(Lake::new(config.clone(), Arc::clone(&engine)).await?);
 
     let synchronizer = FStorageSynchronizer::new(
         Arc::clone(&catalog),
@@ -95,7 +95,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node = engine.storage.get_node(&txn, &node_id)?;
     println!("  - node label: {}", node.label);
     if let Some(props) = node.properties {
-        println!("  - properties keys: {:?}", props.keys().collect::<Vec<_>>());
+        println!(
+            "  - properties keys: {:?}",
+            props.keys().collect::<Vec<_>>()
+        );
     }
 
     println!("\n🎉 Graph pipeline smoke-test completed successfully");
