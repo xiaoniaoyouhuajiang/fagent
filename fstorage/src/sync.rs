@@ -390,7 +390,18 @@ impl DataSynchronizer for FStorageSynchronizer {
             let record_batch = fetchable_collection.to_record_batch_any()?;
 
             // Cold Path: Write to Data Lake
-            let table_name = fetchable_collection.table_name();
+            let entity_type = fetchable_collection.entity_type_any();
+            let category = fetchable_collection.category_any();
+            let table_name = match category {
+                EntityCategory::Edge => {
+                    let edge_suffix = entity_type
+                        .strip_prefix("edge_")
+                        .unwrap_or(entity_type)
+                        .to_lowercase();
+                    format!("silver/edges/{}", edge_suffix)
+                }
+                EntityCategory::Node => fetchable_collection.table_name(),
+            };
             let merge_keys: Vec<String> = fetchable_collection
                 .primary_keys_any()
                 .into_iter()
@@ -404,12 +415,8 @@ impl DataSynchronizer for FStorageSynchronizer {
             self.lake
                 .write_batches(&table_name, vec![record_batch.clone()], merge_on)
                 .await?;
-            self.catalog.ensure_ingestion_offset(
-                &table_name,
-                fetchable_collection.entity_type_any(),
-                fetchable_collection.category_any(),
-                &merge_keys,
-            )?;
+            self.catalog
+                .ensure_ingestion_offset(&table_name, entity_type, category, &merge_keys)?;
 
             // Hot Path: Write to Graph Engine
             self.update_engine_from_batch(fetchable_collection, &record_batch)?;
