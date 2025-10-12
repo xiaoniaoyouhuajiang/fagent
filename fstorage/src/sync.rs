@@ -1,3 +1,4 @@
+use crate::auto_fetchable;
 use crate::catalog::Catalog;
 use crate::errors::{Result, StorageError};
 use crate::fetch::{EntityCategory, FetchResponse, Fetcher, GraphData};
@@ -6,6 +7,8 @@ use crate::models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext};
 use crate::utils;
 use async_trait::async_trait;
 use bincode;
+use deltalake::arrow::array::StringArray;
+use deltalake::arrow::datatypes::{DataType, Field, Schema};
 use deltalake::arrow::record_batch::RecordBatch;
 use helix_db::{
     helix_engine::{
@@ -26,6 +29,7 @@ use helix_db::{
         label_hash::hash_label,
     },
 };
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -380,6 +384,107 @@ impl FStorageSynchronizer {
         txn.commit()?;
         Ok(())
     }
+
+    fn build_node_index_batch(
+        entity_type: &str,
+        batch: &RecordBatch,
+        primary_keys: &[String],
+    ) -> Result<Option<RecordBatch>> {
+        if batch.num_rows() == 0 {
+            return Ok(None);
+        }
+
+        let schema = batch.schema();
+        let mut ids: Vec<Option<String>> = Vec::with_capacity(batch.num_rows());
+        let mut pk_jsons: Vec<Option<String>> = Vec::with_capacity(batch.num_rows());
+        let mut updated: Vec<Option<chrono::DateTime<chrono::Utc>>> =
+            Vec::with_capacity(batch.num_rows());
+
+        for row in 0..batch.num_rows() {
+            let mut node_id_str: Option<String> = None;
+            if let Ok(idx) = schema.index_of("id") {
+                let column = batch.column(idx);
+                if let Some(value) = Self::arrow_value_to_helix_value(column, row) {
+                    node_id_str = Some(value.inner_stringify());
+                }
+            }
+
+            let mut pk_pairs: Vec<(String, String)> = Vec::new();
+            let mut pk_map = JsonMap::new();
+            for key in primary_keys {
+                if let Ok(idx) = schema.index_of(key) {
+                    let column = batch.column(idx);
+                    if let Some(value) = Self::arrow_value_to_helix_value(column, row) {
+                        let stringified = value.inner_stringify();
+                        pk_pairs.push((key.clone(), stringified.clone()));
+                        pk_map.insert(key.clone(), JsonValue::String(stringified));
+                    }
+                }
+            }
+
+            let id_u128 = if let Some(id_str) = node_id_str {
+                match Uuid::parse_str(&id_str) {
+                    Ok(id) => id.as_u128(),
+                    Err(_) => {
+                        log::warn!(
+                            "Failed to parse UUID for node id '{}' while building index for '{}'",
+                            id_str,
+                            entity_type
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                if pk_pairs.is_empty() {
+                    log::warn!(
+                        "Skipping index entry for '{}' row {} due to missing id and primary keys",
+                        entity_type,
+                        row
+                    );
+                    continue;
+                }
+                let key_slices: Vec<(&str, String)> =
+                    pk_pairs.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+                utils::id::stable_node_id_u128(entity_type, &key_slices)
+            };
+
+            let id_string = Uuid::from_u128(id_u128).to_string();
+            ids.push(Some(id_string));
+
+            let pk_json = JsonValue::Object(pk_map).to_string();
+            pk_jsons.push(Some(pk_json));
+
+            updated.push(Some(chrono::Utc::now()));
+        }
+
+        if ids.is_empty() {
+            return Ok(None);
+        }
+
+        let id_array = Arc::new(StringArray::from(ids)) as deltalake::arrow::array::ArrayRef;
+        let pk_array = Arc::new(StringArray::from(pk_jsons)) as deltalake::arrow::array::ArrayRef;
+        let updated_array = auto_fetchable::to_arrow_array(updated)?;
+
+        let index_schema = Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("pks", DataType::Utf8, false),
+            Field::new(
+                "updated_at",
+                DataType::Timestamp(
+                    deltalake::arrow::datatypes::TimeUnit::Microsecond,
+                    Some("UTC".into()),
+                ),
+                true,
+            ),
+        ]);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(index_schema),
+            vec![id_array, pk_array, updated_array],
+        )?;
+
+        Ok(Some(batch))
+    }
 }
 
 #[async_trait]
@@ -417,6 +522,27 @@ impl DataSynchronizer for FStorageSynchronizer {
                 .await?;
             self.catalog
                 .ensure_ingestion_offset(&table_name, entity_type, category, &merge_keys)?;
+
+            if matches!(category, EntityCategory::Node) {
+                if let Some(index_batch) =
+                    Self::build_node_index_batch(entity_type, &record_batch, &merge_keys)?
+                {
+                    let index_table_name = format!("silver/index/{}", entity_type);
+                    self.lake
+                        .write_batches(
+                            &index_table_name,
+                            vec![index_batch],
+                            Some(vec!["id".to_string()]),
+                        )
+                        .await?;
+                    self.catalog.ensure_ingestion_offset(
+                        &index_table_name,
+                        entity_type,
+                        category,
+                        &vec!["id".to_string()],
+                    )?;
+                }
+            }
 
             // Hot Path: Write to Graph Engine
             self.update_engine_from_batch(fetchable_collection, &record_batch)?;

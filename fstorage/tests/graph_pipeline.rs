@@ -1,4 +1,8 @@
-use deltalake::open_table;
+use deltalake::{
+    arrow::array::StringArray,
+    datafusion::execution::context::SessionContext,
+    open_table,
+};
 use fstorage::{
     fetch::Fetchable,
     schemas::generated_schemas::Project,
@@ -9,7 +13,9 @@ use helix_db::{
     helix_engine::storage_core::storage_methods::StorageMethods,
     protocol::value::Value,
 };
+use std::sync::Arc;
 use uuid::Uuid;
+use serde_json::Value as JsonValue;
 
 mod common;
 
@@ -58,6 +64,46 @@ async fn graph_pipeline_updates_delta_and_helix() -> anyhow::Result<()> {
         ctx.engine.storage.get_node(&txn, &node_id).is_ok(),
         "node {} should exist in Helix",
         node_uuid
+    );
+
+    let index_table_path = ctx
+        .config
+        .lake_path
+        .join(format!("silver/index/{}", Project::ENTITY_TYPE));
+    assert!(index_table_path.exists(), "index table directory should exist");
+    let index_uri = index_table_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("non-UTF8 index path"))?
+        .to_string();
+    let index_table = open_table(index_uri).await?;
+    assert_eq!(index_table.version(), 0);
+
+    let ctx_df = SessionContext::new();
+    ctx_df.register_table("index_table", Arc::new(index_table))?;
+    let df = ctx_df.sql("SELECT id, pks FROM index_table").await?;
+    let batches = df.collect().await?;
+    assert_eq!(batches.len(), 1);
+    let batch = &batches[0];
+    assert_eq!(batch.num_rows(), 1);
+
+    let id_column = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("id column should be utf8");
+    assert_eq!(id_column.value(0), node_uuid.to_string());
+
+    let pks_column = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("pks column should be utf8");
+    let pk_json: JsonValue = serde_json::from_str(pks_column.value(0))?;
+    assert_eq!(
+        pk_json
+            .get("url")
+            .and_then(|value| value.as_str()),
+        Some("https://github.com/example/repo")
     );
 
     Ok(())
