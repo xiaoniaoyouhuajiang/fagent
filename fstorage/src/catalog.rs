@@ -1,8 +1,8 @@
 use crate::config::StorageConfig;
 use crate::errors::Result;
 use crate::fetch::EntityCategory;
-use crate::models::{ApiBudget, EntityReadiness, IngestionOffset};
-use rusqlite::{Connection, params};
+use crate::models::{ApiBudget, EntityReadiness, IngestionOffset, SourceAnchor};
+use rusqlite::{params, Connection};
 use serde_json;
 use std::sync::{Arc, Mutex};
 
@@ -48,6 +48,14 @@ impl Catalog {
                 category TEXT NOT NULL,
                 primary_keys TEXT NOT NULL,
                 last_version INTEGER NOT NULL DEFAULT -1
+            );
+            CREATE TABLE IF NOT EXISTS source_anchors (
+                entity_uri TEXT NOT NULL,
+                fetcher TEXT NOT NULL,
+                anchor_key TEXT NOT NULL,
+                anchor_value TEXT,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (entity_uri, fetcher, anchor_key)
             );
             COMMIT;",
         )?;
@@ -218,6 +226,52 @@ impl Catalog {
             primary_keys,
             last_version,
         })
+    }
+
+    pub fn get_source_anchor(
+        &self,
+        entity_uri: &str,
+        fetcher: &str,
+        anchor_key: &str,
+    ) -> Result<Option<SourceAnchor>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT entity_uri, fetcher, anchor_key, anchor_value, updated_at
+             FROM source_anchors
+             WHERE entity_uri = ?1 AND fetcher = ?2 AND anchor_key = ?3",
+        )?;
+        let mut rows = stmt.query(params![entity_uri, fetcher, anchor_key])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(SourceAnchor {
+                entity_uri: row.get(0)?,
+                fetcher: row.get(1)?,
+                anchor_key: row.get(2)?,
+                anchor_value: row.get(3)?,
+                updated_at: row.get(4)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn upsert_source_anchor(
+        &self,
+        entity_uri: &str,
+        fetcher: &str,
+        anchor_key: &str,
+        anchor_value: Option<&str>,
+        updated_at: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO source_anchors (entity_uri, fetcher, anchor_key, anchor_value, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(entity_uri, fetcher, anchor_key) DO UPDATE SET
+                anchor_value = excluded.anchor_value,
+                updated_at = excluded.updated_at",
+            params![entity_uri, fetcher, anchor_key, anchor_value, updated_at],
+        )?;
+        Ok(())
     }
 }
 

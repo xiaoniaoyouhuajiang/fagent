@@ -1,6 +1,8 @@
 use crate::errors::Result;
 use async_trait::async_trait;
 use deltalake::arrow::record_batch::RecordBatch;
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 /// The category of an entity in the knowledge graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,10 +114,41 @@ pub enum FetchResponse {
 use crate::embedding::EmbeddingProvider;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeReport {
+    pub fresh: Option<bool>,
+    pub remote_anchor: Option<String>,
+    pub local_anchor: Option<String>,
+    pub anchor_key: Option<String>,
+    pub estimated_missing: Option<u64>,
+    pub rate_limit_left: Option<u32>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProducedDataset {
+    pub kind: &'static str,
+    pub name: String,
+    pub table_path: String,
+    pub primary_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FetcherCapability {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub param_schema: JsonValue,
+    pub produces: Vec<ProducedDataset>,
+    pub default_ttl_secs: Option<i64>,
+    pub examples: Vec<JsonValue>,
+}
+
 /// The evolved Fetcher trait, capable of returning a unified graph update package.
 #[async_trait]
 pub trait Fetcher: Send + Sync {
     fn name(&self) -> &'static str;
+    fn capability(&self) -> FetcherCapability;
+    async fn probe(&self, params: JsonValue) -> Result<ProbeReport>;
     async fn fetch(
         &self,
         params: serde_json::Value,

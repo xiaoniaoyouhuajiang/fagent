@@ -1,7 +1,7 @@
 use crate::auto_fetchable;
 use crate::catalog::Catalog;
 use crate::errors::{Result, StorageError};
-use crate::fetch::{EntityCategory, FetchResponse, Fetcher, GraphData};
+use crate::fetch::{EntityCategory, FetchResponse, Fetcher, GraphData, ProbeReport};
 use crate::lake::Lake;
 use crate::models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext};
 use crate::utils;
@@ -13,15 +13,15 @@ use deltalake::arrow::datatypes::{DataType, Field, Schema};
 use deltalake::arrow::record_batch::RecordBatch;
 use helix_db::{
     helix_engine::{
-        bm25::bm25::{BM25, BM25Flatten},
+        bm25::bm25::{BM25Flatten, BM25},
         storage_core::storage_methods::StorageMethods,
         traversal_core::{
-            HelixGraphEngine,
             ops::{
                 g::G,
                 source::{e_from_id::EFromIdAdapter, n_from_id::NFromIdAdapter},
                 util::update::UpdateAdapter,
             },
+            HelixGraphEngine,
         },
     },
     protocol::value::Value,
@@ -68,7 +68,7 @@ pub struct FStorageSynchronizer {
     catalog: Arc<Catalog>,
     lake: Arc<Lake>,
     engine: Arc<HelixGraphEngine>,
-    fetchers: HashMap<&'static str, Arc<dyn Fetcher>>,
+    fetchers: HashMap<String, Arc<dyn Fetcher>>,
     embedding_provider: Arc<dyn EmbeddingProvider>,
 }
 
@@ -573,7 +573,8 @@ impl DataSynchronizer for FStorageSynchronizer {
         Ok(())
     }
     fn register_fetcher(&mut self, fetcher: Arc<dyn Fetcher>) {
-        self.fetchers.insert(fetcher.name(), fetcher);
+        let name = fetcher.name().to_string();
+        self.fetchers.insert(name, fetcher);
     }
 
     async fn check_readiness(
@@ -584,22 +585,74 @@ impl DataSynchronizer for FStorageSynchronizer {
         let now = chrono::Utc::now().timestamp();
 
         for entity in entities {
-            let readiness = self.catalog.get_readiness(&entity.uri)?;
-            let (is_fresh, gap) = if let Some(r) = readiness {
-                if let (Some(last_synced), Some(ttl)) = (r.last_synced_at, r.ttl_seconds) {
-                    let gap = now - last_synced;
-                    (gap < ttl, Some(gap))
-                } else {
-                    (false, None)
+            let readiness_record = self.catalog.get_readiness(&entity.uri)?;
+            let mut coverage_metrics = serde_json::Value::Null;
+            let mut ttl_fresh = false;
+            let mut gap = None;
+
+            if let Some(ref readiness) = readiness_record {
+                coverage_metrics = serde_json::from_str(&readiness.coverage_metrics)
+                    .unwrap_or(serde_json::Value::Null);
+                if let (Some(last_synced), Some(ttl)) =
+                    (readiness.last_synced_at, readiness.ttl_seconds)
+                {
+                    let delta = now - last_synced;
+                    gap = Some(delta);
+                    ttl_fresh = delta < ttl;
                 }
-            } else {
-                (false, None)
-            };
+            }
+
+            let mut anchor_fresh = true;
+            let mut probe_report: Option<ProbeReport> = None;
+
+            if let Some(fetcher_name) = entity.fetcher_name.as_deref() {
+                if let Some(fetcher) = self.fetchers.get(fetcher_name) {
+                    let anchor_key = entity.anchor_key.as_deref().unwrap_or("default");
+                    let stored_anchor =
+                        self.catalog
+                            .get_source_anchor(&entity.uri, fetcher_name, anchor_key)?;
+                    let local_anchor_value =
+                        stored_anchor.and_then(|anchor| anchor.anchor_value.clone());
+                    let params = entity
+                        .params
+                        .clone()
+                        .unwrap_or_else(|| serde_json::Value::Null);
+                    match fetcher.probe(params).await {
+                        Ok(mut report) => {
+                            if report.anchor_key.is_none() {
+                                report.anchor_key = Some(anchor_key.to_string());
+                            }
+                            if report.local_anchor.is_none() {
+                                report.local_anchor = local_anchor_value.clone();
+                            }
+                            anchor_fresh = match (&report.remote_anchor, &report.local_anchor) {
+                                (Some(remote), Some(local)) => remote == local,
+                                (Some(_), None) => false,
+                                (None, _) => report.fresh.unwrap_or(true),
+                            };
+                            report.fresh = Some(anchor_fresh);
+                            probe_report = Some(report);
+                        }
+                        Err(err) => {
+                            log::warn!(
+                                "Probe for entity '{}' via fetcher '{}' failed: {}",
+                                entity.uri,
+                                fetcher_name,
+                                err
+                            );
+                            anchor_fresh = false;
+                        }
+                    }
+                }
+            }
+
+            let is_fresh = ttl_fresh && anchor_fresh;
 
             let report = ReadinessReport {
                 is_fresh,
                 freshness_gap_seconds: gap,
-                coverage_metrics: serde_json::Value::Null,
+                coverage_metrics,
+                probe_report,
             };
             reports.insert(entity.uri.clone(), report);
         }
@@ -617,13 +670,15 @@ impl DataSynchronizer for FStorageSynchronizer {
         let task_name = format!("sync_with_{}", fetcher_name);
         let task_id = self.catalog.create_task_log(&task_name)?;
 
-        let fetcher = self.fetchers.get(fetcher_name).ok_or_else(|| {
+        let fetcher = self.fetchers.get(fetcher_name).cloned().ok_or_else(|| {
             StorageError::Config(format!("Fetcher '{}' not registered.", fetcher_name))
         })?;
+        let capability = fetcher.capability();
+        let ttl_default = capability.default_ttl_secs.unwrap_or(3600);
 
         // The fetcher is now responsible for all transformation, including vectorization.
         let response = fetcher
-            .fetch(params, self.embedding_provider.clone())
+            .fetch(params.clone(), self.embedding_provider.clone())
             .await?;
 
         match response {
@@ -644,10 +699,43 @@ impl DataSynchronizer for FStorageSynchronizer {
                 entity_uri: entity.uri.clone(),
                 entity_type: entity.entity_type.clone(),
                 last_synced_at: Some(now),
-                ttl_seconds: Some(3600),
+                ttl_seconds: Some(ttl_default),
                 coverage_metrics: "{}".to_string(),
             };
             self.catalog.upsert_readiness(&readiness)?;
+
+            if entity
+                .fetcher_name
+                .as_deref()
+                .map(|name| name == fetcher_name)
+                .unwrap_or(false)
+            {
+                let anchor_key = entity.anchor_key.as_deref().unwrap_or("default");
+                let probe_params = entity
+                    .params
+                    .clone()
+                    .unwrap_or_else(|| serde_json::Value::Null);
+                match fetcher.probe(probe_params).await {
+                    Ok(report) => {
+                        let anchor_value_ref = report.remote_anchor.as_deref();
+                        self.catalog.upsert_source_anchor(
+                            &entity.uri,
+                            fetcher_name,
+                            anchor_key,
+                            anchor_value_ref,
+                            now,
+                        )?;
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "Post-sync probe for entity '{}' via fetcher '{}' failed: {}",
+                            entity.uri,
+                            fetcher_name,
+                            err
+                        );
+                    }
+                }
+            }
         }
 
         self.catalog

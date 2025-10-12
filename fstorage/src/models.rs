@@ -1,9 +1,17 @@
 use serde::{Deserialize, Serialize};
 
+use crate::fetch::ProbeReport;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct EntityIdentifier {
     pub uri: String,
     pub entity_type: String,
+    #[serde(default)]
+    pub fetcher_name: Option<String>,
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
+    #[serde(default)]
+    pub anchor_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -11,6 +19,8 @@ pub struct ReadinessReport {
     pub is_fresh: bool,
     pub freshness_gap_seconds: Option<i64>,
     pub coverage_metrics: serde_json::Value,
+    #[serde(default)]
+    pub probe_report: Option<ProbeReport>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,4 +70,13 @@ pub struct IngestionOffset {
     pub category: crate::fetch::EntityCategory,
     pub primary_keys: Vec<String>,
     pub last_version: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceAnchor {
+    pub entity_uri: String,
+    pub fetcher: String,
+    pub anchor_key: String,
+    pub anchor_value: Option<String>,
+    pub updated_at: i64,
 }
