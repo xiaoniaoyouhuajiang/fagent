@@ -89,7 +89,7 @@ impl Fetcher for MockFetcher {
 
 #[tokio::test]
 async fn readiness_probe_tracks_anchor_freshness() -> anyhow::Result<()> {
-    let mut ctx = common::init_test_context().await?;
+    let ctx = common::init_test_context().await?;
     let fetcher = Arc::new(MockFetcher::new("sha-initial"));
     ctx.synchronizer
         .register_fetcher(Arc::clone(&fetcher) as Arc<dyn Fetcher>);

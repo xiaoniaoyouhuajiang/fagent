@@ -14,11 +14,13 @@ use crate::catalog::Catalog;
 use crate::config::StorageConfig;
 use crate::embedding::{EmbeddingProvider, NullEmbeddingProvider, OpenAIProvider};
 use crate::errors::Result;
-use crate::fetch::Fetcher;
+use crate::fetch::{Fetcher, FetcherCapability};
 use crate::lake::Lake;
+use crate::models::{EntityIdentifier, EntityMetadata, ReadinessReport, TableSummary};
 use crate::sync::{DataSynchronizer, FStorageSynchronizer};
 use helix_db::helix_engine::traversal_core::{HelixGraphEngine, HelixGraphEngineOpts};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// The main entry point for the `fstorage` library.
 ///
@@ -28,7 +30,7 @@ pub struct FStorage {
     pub catalog: Arc<Catalog>,
     pub lake: Arc<Lake>,
     pub engine: Arc<HelixGraphEngine>,
-    pub synchronizer: Arc<Mutex<dyn DataSynchronizer + Send + Sync>>,
+    pub synchronizer: Arc<FStorageSynchronizer>,
 }
 
 impl FStorage {
@@ -73,12 +75,12 @@ impl FStorage {
             }
         };
 
-        let synchronizer = Arc::new(Mutex::new(FStorageSynchronizer::new(
+        let synchronizer = Arc::new(FStorageSynchronizer::new(
             Arc::clone(&catalog),
             Arc::clone(&lake),
             Arc::clone(&engine),
             embedding_provider.clone(),
-        )));
+        ));
 
         Ok(Self {
             config,
@@ -94,7 +96,42 @@ impl FStorage {
     /// This method allows the application's entry point (e.g., `fagent`) to
     /// inject concrete fetcher implementations into the storage layer.
     pub fn register_fetcher(&self, fetcher: Arc<dyn Fetcher>) {
-        self.synchronizer.lock().unwrap().register_fetcher(fetcher);
+        self.synchronizer.register_fetcher(fetcher);
+    }
+
+    /// Lists the capabilities for all registered fetchers.
+    pub fn list_fetchers_capability(&self) -> Vec<FetcherCapability> {
+        self.synchronizer.list_fetcher_capabilities()
+    }
+
+    /// Lists known entities/edges along with their ingestion metadata tracked in the catalog.
+    pub fn list_known_entities(&self) -> Result<Vec<EntityMetadata>> {
+        let offsets = self.catalog.list_ingestion_offsets()?;
+        let mut entities: Vec<_> = offsets
+            .into_iter()
+            .map(|offset| EntityMetadata {
+                table_path: offset.table_path,
+                entity_type: offset.entity_type,
+                category: offset.category.as_str().to_string(),
+                primary_keys: offset.primary_keys,
+                last_version: offset.last_version,
+            })
+            .collect();
+        entities.sort_by(|a, b| a.table_path.cmp(&b.table_path));
+        Ok(entities)
+    }
+
+    /// Lists Delta tables under a given prefix, returning their schema summaries.
+    pub async fn list_tables(&self, prefix: &str) -> Result<Vec<TableSummary>> {
+        self.lake.list_tables(prefix).await
+    }
+
+    /// Returns readiness reports for a collection of entities.
+    pub async fn get_readiness(
+        &self,
+        entities: &[EntityIdentifier],
+    ) -> Result<HashMap<String, ReadinessReport>> {
+        self.synchronizer.check_readiness(entities).await
     }
 }
 

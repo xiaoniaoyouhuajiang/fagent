@@ -1,5 +1,6 @@
 use crate::config::StorageConfig;
 use crate::errors::{Result, StorageError};
+use crate::models::{ColumnSummary, TableSummary};
 use crate::utils;
 use chrono::{DateTime, Utc};
 use deltalake::arrow::array::{
@@ -1360,6 +1361,81 @@ impl Lake {
         }
 
         Ok(edge_types)
+    }
+
+    pub async fn list_tables(&self, prefix: &str) -> Result<Vec<TableSummary>> {
+        let mut tables = Vec::new();
+        let base_path = if prefix.is_empty() {
+            self.config.lake_path.clone()
+        } else {
+            self.config.lake_path.join(prefix)
+        };
+
+        if tokio::fs::metadata(&base_path).await.is_err() {
+            return Ok(tables);
+        }
+
+        let mut stack = vec![base_path];
+
+        while let Some(current) = stack.pop() {
+            let delta_log = current.join("_delta_log");
+            if tokio::fs::metadata(&delta_log).await.is_ok() {
+                if let Some(uri) = current.to_str() {
+                    match deltalake::open_table(uri).await {
+                        Ok(table) => {
+                            if let Some(schema) = table.schema() {
+                                let mut columns: Vec<ColumnSummary> = schema
+                                    .fields()
+                                    .iter()
+                                    .map(|field| ColumnSummary {
+                                        name: field.name().to_string(),
+                                        data_type: field.data_type().to_string(),
+                                        nullable: field.is_nullable(),
+                                    })
+                                    .collect();
+                                columns.sort_by(|a, b| a.name.cmp(&b.name));
+                                let relative = current
+                                    .strip_prefix(&self.config.lake_path)
+                                    .unwrap_or(&current)
+                                    .to_string_lossy()
+                                    .to_string();
+                                tables.push(TableSummary {
+                                    table_path: relative,
+                                    columns,
+                                });
+                            }
+                        }
+                        Err(err) => {
+                            log::warn!("Failed to open table at '{}': {}", uri, err);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let mut entries = match tokio::fs::read_dir(&current).await {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+
+            while let Some(entry) = entries
+                .next_entry()
+                .await
+                .map_err(|e| StorageError::Other(e.into()))?
+            {
+                if entry
+                    .file_type()
+                    .await
+                    .map_err(|e| StorageError::Other(e.into()))?
+                    .is_dir()
+                {
+                    stack.push(entry.path());
+                }
+            }
+        }
+
+        tables.sort_by(|a, b| a.table_path.cmp(&b.table_path));
+        Ok(tables)
     }
 }
 

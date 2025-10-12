@@ -23,6 +23,28 @@ pub struct ReadinessReport {
     pub probe_report: Option<ProbeReport>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EntityMetadata {
+    pub table_path: String,
+    pub entity_type: String,
+    pub category: String,
+    pub primary_keys: Vec<String>,
+    pub last_version: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ColumnSummary {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TableSummary {
+    pub table_path: String,
+    pub columns: Vec<ColumnSummary>,
+}
+
 #[derive(Debug, Clone)]
 pub enum SyncBudget {
     ByDuration(std::time::Duration),

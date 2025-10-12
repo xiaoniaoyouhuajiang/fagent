@@ -1,7 +1,9 @@
 use crate::auto_fetchable;
 use crate::catalog::Catalog;
 use crate::errors::{Result, StorageError};
-use crate::fetch::{EntityCategory, FetchResponse, Fetcher, GraphData, ProbeReport};
+use crate::fetch::{
+    EntityCategory, FetchResponse, Fetcher, FetcherCapability, GraphData, ProbeReport,
+};
 use crate::lake::Lake;
 use crate::models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext};
 use crate::utils;
@@ -31,14 +33,17 @@ use helix_db::{
     },
 };
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
 /// Defines the core interface for dynamically synchronizing data.
 #[async_trait]
 pub trait DataSynchronizer {
     /// Registers a concrete fetcher implementation with the synchronizer.
-    fn register_fetcher(&mut self, fetcher: Arc<dyn Fetcher>);
+    fn register_fetcher(&self, fetcher: Arc<dyn Fetcher>);
+
+    /// Lists the capabilities of all registered fetchers.
+    fn list_fetcher_capabilities(&self) -> Vec<FetcherCapability>;
 
     /// Checks the readiness of one or more data entities.
     async fn check_readiness(
@@ -68,7 +73,7 @@ pub struct FStorageSynchronizer {
     catalog: Arc<Catalog>,
     lake: Arc<Lake>,
     engine: Arc<HelixGraphEngine>,
-    fetchers: HashMap<String, Arc<dyn Fetcher>>,
+    fetchers: RwLock<HashMap<String, Arc<dyn Fetcher>>>,
     embedding_provider: Arc<dyn EmbeddingProvider>,
 }
 
@@ -83,7 +88,7 @@ impl FStorageSynchronizer {
             catalog,
             lake,
             engine,
-            fetchers: HashMap::new(),
+            fetchers: RwLock::new(HashMap::new()),
             embedding_provider,
         }
     }
@@ -572,9 +577,17 @@ impl DataSynchronizer for FStorageSynchronizer {
 
         Ok(())
     }
-    fn register_fetcher(&mut self, fetcher: Arc<dyn Fetcher>) {
+    fn register_fetcher(&self, fetcher: Arc<dyn Fetcher>) {
         let name = fetcher.name().to_string();
-        self.fetchers.insert(name, fetcher);
+        let mut guard = self.fetchers.write().unwrap();
+        guard.insert(name, fetcher);
+    }
+
+    fn list_fetcher_capabilities(&self) -> Vec<FetcherCapability> {
+        let guard = self.fetchers.read().unwrap();
+        let mut caps: Vec<_> = guard.values().map(|fetcher| fetcher.capability()).collect();
+        caps.sort_by(|a, b| a.name.cmp(b.name));
+        caps
     }
 
     async fn check_readiness(
@@ -606,7 +619,11 @@ impl DataSynchronizer for FStorageSynchronizer {
             let mut probe_report: Option<ProbeReport> = None;
 
             if let Some(fetcher_name) = entity.fetcher_name.as_deref() {
-                if let Some(fetcher) = self.fetchers.get(fetcher_name) {
+                let fetcher_arc = {
+                    let guard = self.fetchers.read().unwrap();
+                    guard.get(fetcher_name).cloned()
+                };
+                if let Some(fetcher) = fetcher_arc {
                     let anchor_key = entity.anchor_key.as_deref().unwrap_or("default");
                     let stored_anchor =
                         self.catalog
@@ -643,6 +660,12 @@ impl DataSynchronizer for FStorageSynchronizer {
                             anchor_fresh = false;
                         }
                     }
+                } else {
+                    log::debug!(
+                        "Fetcher '{}' requested for readiness probe but not registered.",
+                        fetcher_name
+                    );
+                    anchor_fresh = false;
                 }
             }
 
@@ -670,7 +693,11 @@ impl DataSynchronizer for FStorageSynchronizer {
         let task_name = format!("sync_with_{}", fetcher_name);
         let task_id = self.catalog.create_task_log(&task_name)?;
 
-        let fetcher = self.fetchers.get(fetcher_name).cloned().ok_or_else(|| {
+        let fetcher = {
+            let guard = self.fetchers.read().unwrap();
+            guard.get(fetcher_name).cloned()
+        }
+        .ok_or_else(|| {
             StorageError::Config(format!("Fetcher '{}' not registered.", fetcher_name))
         })?;
         let capability = fetcher.capability();
