@@ -15,7 +15,6 @@ use helix_db::{
 };
 use std::sync::Arc;
 use uuid::Uuid;
-use serde_json::Value as JsonValue;
 
 mod common;
 
@@ -80,7 +79,7 @@ async fn graph_pipeline_updates_delta_and_helix() -> anyhow::Result<()> {
 
     let ctx_df = SessionContext::new();
     ctx_df.register_table("index_table", Arc::new(index_table))?;
-    let df = ctx_df.sql("SELECT id, pks FROM index_table").await?;
+    let df = ctx_df.sql("SELECT id, url FROM index_table").await?;
     let batches = df.collect().await?;
     assert_eq!(batches.len(), 1);
     let batch = &batches[0];
@@ -93,17 +92,14 @@ async fn graph_pipeline_updates_delta_and_helix() -> anyhow::Result<()> {
         .expect("id column should be utf8");
     assert_eq!(id_column.value(0), node_uuid.to_string());
 
-    let pks_column = batch
+    let url_column = batch
         .column(1)
         .as_any()
         .downcast_ref::<StringArray>()
-        .expect("pks column should be utf8");
-    let pk_json: JsonValue = serde_json::from_str(pks_column.value(0))?;
+        .expect("url column should be utf8");
     assert_eq!(
-        pk_json
-            .get("url")
-            .and_then(|value| value.as_str()),
-        Some("https://github.com/example/repo")
+        url_column.value(0),
+        "https://github.com/example/repo"
     );
 
     Ok(())

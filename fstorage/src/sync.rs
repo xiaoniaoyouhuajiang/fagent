@@ -7,7 +7,8 @@ use crate::models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext};
 use crate::utils;
 use async_trait::async_trait;
 use bincode;
-use deltalake::arrow::array::StringArray;
+use chrono::Utc;
+use deltalake::arrow::array::{Array, StringArray};
 use deltalake::arrow::datatypes::{DataType, Field, Schema};
 use deltalake::arrow::record_batch::RecordBatch;
 use helix_db::{
@@ -29,7 +30,6 @@ use helix_db::{
         label_hash::hash_label,
     },
 };
-use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -395,8 +395,11 @@ impl FStorageSynchronizer {
         }
 
         let schema = batch.schema();
-        let mut ids: Vec<Option<String>> = Vec::with_capacity(batch.num_rows());
-        let mut pk_jsons: Vec<Option<String>> = Vec::with_capacity(batch.num_rows());
+        let mut ids: Vec<String> = Vec::with_capacity(batch.num_rows());
+        let mut pk_columns: HashMap<String, Vec<Option<String>>> = primary_keys
+            .iter()
+            .map(|k| (k.clone(), Vec::with_capacity(batch.num_rows())))
+            .collect();
         let mut updated: Vec<Option<chrono::DateTime<chrono::Utc>>> =
             Vec::with_capacity(batch.num_rows());
 
@@ -409,17 +412,19 @@ impl FStorageSynchronizer {
                 }
             }
 
-            let mut pk_pairs: Vec<(String, String)> = Vec::new();
-            let mut pk_map = JsonMap::new();
+            let mut pk_values: HashMap<String, Option<String>> = HashMap::new();
             for key in primary_keys {
-                if let Ok(idx) = schema.index_of(key) {
+                let value = if let Ok(idx) = schema.index_of(key) {
                     let column = batch.column(idx);
                     if let Some(value) = Self::arrow_value_to_helix_value(column, row) {
-                        let stringified = value.inner_stringify();
-                        pk_pairs.push((key.clone(), stringified.clone()));
-                        pk_map.insert(key.clone(), JsonValue::String(stringified));
+                        Some(value.inner_stringify())
+                    } else {
+                        None
                     }
-                }
+                } else {
+                    None
+                };
+                pk_values.insert(key.clone(), value);
             }
 
             let id_u128 = if let Some(id_str) = node_id_str {
@@ -435,7 +440,11 @@ impl FStorageSynchronizer {
                     }
                 }
             } else {
-                if pk_pairs.is_empty() {
+                let pk_pairs: Vec<(&str, String)> = pk_values
+                    .iter()
+                    .filter_map(|(k, v)| v.clone().map(|val| (k.as_str(), val)))
+                    .collect();
+                if pk_pairs.len() != primary_keys.len() || pk_pairs.is_empty() {
                     log::warn!(
                         "Skipping index entry for '{}' row {} due to missing id and primary keys",
                         entity_type,
@@ -443,45 +452,51 @@ impl FStorageSynchronizer {
                     );
                     continue;
                 }
-                let key_slices: Vec<(&str, String)> =
-                    pk_pairs.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-                utils::id::stable_node_id_u128(entity_type, &key_slices)
+                utils::id::stable_node_id_u128(entity_type, &pk_pairs)
             };
 
             let id_string = Uuid::from_u128(id_u128).to_string();
-            ids.push(Some(id_string));
+        ids.push(id_string);
+        updated.push(Some(Utc::now()));
 
-            let pk_json = JsonValue::Object(pk_map).to_string();
-            pk_jsons.push(Some(pk_json));
-
-            updated.push(Some(chrono::Utc::now()));
+            for key in primary_keys {
+                if let Some(column) = pk_columns.get_mut(key) {
+                    column.push(pk_values.get(key).cloned().unwrap_or(None));
+                }
+            }
         }
 
         if ids.is_empty() {
             return Ok(None);
         }
 
-        let id_array = Arc::new(StringArray::from(ids)) as deltalake::arrow::array::ArrayRef;
-        let pk_array = Arc::new(StringArray::from(pk_jsons)) as deltalake::arrow::array::ArrayRef;
-        let updated_array = auto_fetchable::to_arrow_array(updated)?;
+        let mut fields = Vec::new();
+        fields.push(Field::new("id", DataType::Utf8, false));
+        let mut arrays: Vec<Arc<dyn Array>> = Vec::new();
+        arrays.push(Arc::new(StringArray::from(ids)) as Arc<dyn Array>);
 
-        let index_schema = Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("pks", DataType::Utf8, false),
-            Field::new(
-                "updated_at",
-                DataType::Timestamp(
-                    deltalake::arrow::datatypes::TimeUnit::Microsecond,
-                    Some("UTC".into()),
-                ),
-                true,
+        for key in primary_keys {
+            fields.push(Field::new(key, DataType::Utf8, true));
+            if let Some(values) = pk_columns.get(key) {
+                arrays.push(Arc::new(StringArray::from(values.clone())) as Arc<dyn Array>);
+            } else {
+                arrays.push(Arc::new(StringArray::from(vec![None::<String>; updated.len()])) as Arc<dyn Array>);
+            }
+        }
+
+        fields.push(Field::new(
+            "updated_at",
+            DataType::Timestamp(
+                deltalake::arrow::datatypes::TimeUnit::Microsecond,
+                Some("UTC".into()),
             ),
-        ]);
+            true,
+        ));
+        arrays.push(auto_fetchable::to_arrow_array(updated)?);
 
-        let batch = RecordBatch::try_new(
-            Arc::new(index_schema),
-            vec![id_array, pk_array, updated_array],
-        )?;
+        let index_schema = Schema::new(fields);
+
+        let batch = RecordBatch::try_new(Arc::new(index_schema), arrays)?;
 
         Ok(Some(batch))
     }

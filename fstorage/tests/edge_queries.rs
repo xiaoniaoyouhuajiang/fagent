@@ -102,6 +102,24 @@ async fn helix_and_delta_edge_queries_both_succeed() -> anyhow::Result<()> {
         Some("function-helper")
     );
 
+    {
+        let mut txn = ctx.engine.storage.graph_env.write_txn()?;
+        ctx.engine.storage.nodes_db.delete(&mut txn, &to_node_id)?;
+        txn.commit()?;
+    }
+
+    let node_from_cold = ctx
+        .lake
+        .get_node_by_id(&to_uuid_string, Some(Function::ENTITY_TYPE))
+        .await?
+        .expect("node should be retrievable via index");
+    assert_eq!(
+        node_from_cold
+            .get("name")
+            .and_then(|value| value.as_str()),
+        Some(to_name)
+    );
+
     let stats = ctx.lake.get_edge_statistics().await?;
     assert!(
         stats.contains_key("calls"),

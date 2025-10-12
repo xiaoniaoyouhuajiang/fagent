@@ -20,7 +20,7 @@ use helix_db::helix_engine::storage_core::storage_methods::StorageMethods;
 use helix_db::helix_engine::traversal_core::HelixGraphEngine;
 use helix_db::helix_engine::types::GraphError;
 use helix_db::protocol::value::Value as HelixValue;
-use helix_db::utils::items::Edge;
+use helix_db::utils::items::{Edge, Node};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -341,6 +341,244 @@ impl Lake {
         }
 
         result
+    }
+
+    fn node_to_map(node: Node) -> HashMap<String, JsonValue> {
+        let mut result = HashMap::new();
+        result.insert(
+            "id".to_string(),
+            JsonValue::String(Uuid::from_u128(node.id).to_string()),
+        );
+        result.insert("label".to_string(), JsonValue::String(node.label.clone()));
+        let properties = if let Some(props) = node.properties {
+            let mut json_map = serde_json::Map::new();
+            for (k, v) in props {
+                json_map.insert(k, Self::helix_value_to_json(&v));
+            }
+            JsonValue::Object(json_map)
+        } else {
+            JsonValue::Null
+        };
+        result.insert("properties".to_string(), properties);
+        result
+    }
+
+    fn record_batch_row_to_map(batch: &RecordBatch, row: usize) -> Result<HashMap<String, JsonValue>> {
+        let schema = batch.schema();
+        let mut map = HashMap::new();
+        for (col_idx, field) in schema.fields().iter().enumerate() {
+            let column = batch.column(col_idx);
+            let value = if column.is_null(row) {
+                JsonValue::Null
+            } else {
+                Self::arrow_cell_to_json(column, row).unwrap_or(JsonValue::Null)
+            };
+            map.insert(field.name().clone(), value);
+        }
+        Ok(map)
+    }
+
+    fn json_value_to_string(value: &JsonValue) -> Option<String> {
+        match value {
+            JsonValue::Null => None,
+            JsonValue::String(s) => Some(s.clone()),
+            JsonValue::Number(n) => Some(n.to_string()),
+            JsonValue::Bool(b) => Some(b.to_string()),
+            other => Some(other.to_string()),
+        }
+    }
+
+    fn row_matches_primary_keys(
+        batch: &RecordBatch,
+        row: usize,
+        primary_keys: &[(String, Option<String>)],
+    ) -> Result<bool> {
+        let schema = batch.schema();
+        for (key, expected) in primary_keys {
+            let idx = match schema.index_of(key) {
+                Ok(idx) => idx,
+                Err(_) => return Ok(false),
+            };
+            let column = batch.column(idx);
+            if let Some(expected_value) = expected {
+                if column.is_null(row) {
+                    return Ok(false);
+                }
+                let actual_json = match Self::arrow_cell_to_json(column, row) {
+                    Some(value) => value,
+                    None => return Ok(false),
+                };
+                let actual = match Self::json_value_to_string(&actual_json) {
+                    Some(value) => value,
+                    None => return Ok(false),
+                };
+                if actual != *expected_value {
+                    return Ok(false);
+                }
+            } else if !column.is_null(row) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn lookup_node_in_index(
+        &self,
+        entity_type: &str,
+        node_id: &str,
+    ) -> Result<Option<HashMap<String, JsonValue>>> {
+        let index_path = self
+            .config
+            .lake_path
+            .join(format!("silver/index/{}", entity_type));
+        if tokio::fs::metadata(&index_path).await.is_err() {
+            return Ok(None);
+        }
+
+        let table_uri = match index_path.to_str() {
+            Some(uri) => uri,
+            None => return Ok(None),
+        };
+
+        let index_table = match deltalake::open_table(table_uri).await {
+            Ok(table) => table,
+            Err(deltalake::DeltaTableError::NotATable(_)) => return Ok(None),
+            Err(e) => return Err(StorageError::from(e)),
+        };
+
+        let ctx = SessionContext::new();
+        let alias = format!("index_{}", entity_type.replace('-', "_"));
+        ctx.register_table(&alias, Arc::new(index_table))
+            .map_err(|e| StorageError::Other(e.into()))?;
+
+        let escaped_id = node_id.replace('\'', "''");
+        let sql = format!(
+            "SELECT * FROM {alias} WHERE id = '{escaped}' LIMIT 1",
+            alias = alias,
+            escaped = escaped_id
+        );
+        let index_batches = ctx
+            .sql(&sql)
+            .await
+            .map_err(|e| StorageError::Other(e.into()))?
+            .collect()
+            .await
+            .map_err(|e| StorageError::Other(e.into()))?;
+
+        if index_batches.is_empty() || index_batches[0].num_rows() == 0 {
+            return Ok(None);
+        }
+
+        let index_batch = &index_batches[0];
+        let schema = index_batch.schema();
+        let mut pk_values: Vec<(String, Option<String>)> = Vec::new();
+        for (col_idx, field) in schema.fields().iter().enumerate() {
+            let name = field.name();
+            if name == "id" || name == "updated_at" {
+                continue;
+            }
+            let column = index_batch.column(col_idx);
+            if column.is_null(0) {
+                pk_values.push((name.clone(), None));
+            } else if let Some(value) = Self::arrow_cell_to_json(column, 0) {
+                pk_values.push((
+                    name.clone(),
+                    Self::json_value_to_string(&value),
+                ));
+            } else {
+                pk_values.push((name.clone(), None));
+            }
+        }
+
+        let entity_path = self
+            .config
+            .lake_path
+            .join(format!("silver/entities/{}", entity_type));
+        if tokio::fs::metadata(&entity_path).await.is_err() {
+            return Ok(None);
+        }
+
+        let entity_uri = match entity_path.to_str() {
+            Some(uri) => uri,
+            None => return Ok(None),
+        };
+        let entity_table = match deltalake::open_table(entity_uri).await {
+            Ok(table) => table,
+            Err(deltalake::DeltaTableError::NotATable(_)) => return Ok(None),
+            Err(e) => return Err(StorageError::from(e)),
+        };
+
+        let entity_ctx = SessionContext::new();
+        let entity_alias = format!("entity_{}", entity_type.replace('-', "_"));
+        entity_ctx
+            .register_table(&entity_alias, Arc::new(entity_table))
+            .map_err(|e| StorageError::Other(e.into()))?;
+        let entity_batches = entity_ctx
+            .sql(&format!("SELECT * FROM {}", entity_alias))
+            .await
+            .map_err(|e| StorageError::Other(e.into()))?
+            .collect()
+            .await
+            .map_err(|e| StorageError::Other(e.into()))?;
+
+        for batch in entity_batches {
+            for row in 0..batch.num_rows() {
+                if Self::row_matches_primary_keys(&batch, row, &pk_values)? {
+                    let mut map = Self::record_batch_row_to_map(&batch, row)?;
+                    map.insert("id".to_string(), JsonValue::String(node_id.to_string()));
+                    return Ok(Some(map));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn get_available_index_entity_types(&self) -> Result<Vec<String>> {
+        let index_path = self.config.lake_path.join("silver/index");
+        let mut types = Vec::new();
+
+        if tokio::fs::metadata(&index_path).await.is_ok() {
+            let mut entries = tokio::fs::read_dir(&index_path).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(dir_name) = path.file_name().and_then(|name| name.to_str()) {
+                        types.push(dir_name.to_string());
+                    }
+                }
+            }
+        }
+
+        Ok(types)
+    }
+
+    pub async fn get_node_by_id(
+        &self,
+        id: &str,
+        entity_type_hint: Option<&str>,
+    ) -> Result<Option<HashMap<String, JsonValue>>> {
+        if let Ok(uuid) = Uuid::parse_str(id) {
+            let node_key = uuid.as_u128();
+            let txn = self.engine.storage.graph_env.read_txn()?;
+            if let Ok(node) = self.engine.storage.get_node(&txn, &node_key) {
+                return Ok(Some(Self::node_to_map(node)));
+            }
+        }
+
+        let candidate_types = if let Some(hint) = entity_type_hint {
+            vec![hint.to_string()]
+        } else {
+            self.get_available_index_entity_types().await?
+        };
+
+        for entity_type in candidate_types {
+            if let Some(node) = self.lookup_node_in_index(&entity_type, id).await? {
+                return Ok(Some(node));
+            }
+        }
+
+        Ok(None)
     }
 
     async fn get_adjacent_edges(
