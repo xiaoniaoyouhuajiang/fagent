@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 use fstorage::{
-    catalog::Catalog,
-    config::StorageConfig,
-    embedding::NullEmbeddingProvider,
-    lake::Lake,
+    catalog::Catalog, config::StorageConfig, embedding::NullEmbeddingProvider, lake::Lake,
     sync::FStorageSynchronizer,
 };
 use helix_db::helix_engine::traversal_core::{HelixGraphEngine, HelixGraphEngineOpts};

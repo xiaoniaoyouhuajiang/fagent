@@ -456,8 +456,8 @@ impl FStorageSynchronizer {
             };
 
             let id_string = Uuid::from_u128(id_u128).to_string();
-        ids.push(id_string);
-        updated.push(Some(Utc::now()));
+            ids.push(id_string);
+            updated.push(Some(Utc::now()));
 
             for key in primary_keys {
                 if let Some(column) = pk_columns.get_mut(key) {
@@ -480,7 +480,10 @@ impl FStorageSynchronizer {
             if let Some(values) = pk_columns.get(key) {
                 arrays.push(Arc::new(StringArray::from(values.clone())) as Arc<dyn Array>);
             } else {
-                arrays.push(Arc::new(StringArray::from(vec![None::<String>; updated.len()])) as Arc<dyn Array>);
+                arrays.push(
+                    Arc::new(StringArray::from(vec![None::<String>; updated.len()]))
+                        as Arc<dyn Array>,
+                );
             }
         }
 
@@ -535,8 +538,12 @@ impl DataSynchronizer for FStorageSynchronizer {
             self.lake
                 .write_batches(&table_name, vec![record_batch.clone()], merge_on)
                 .await?;
-            self.catalog
-                .ensure_ingestion_offset(&table_name, entity_type, category, &merge_keys)?;
+            self.catalog.ensure_ingestion_offset(
+                &table_name,
+                entity_type,
+                category,
+                &merge_keys,
+            )?;
 
             if matches!(category, EntityCategory::Node) {
                 if let Some(index_batch) =

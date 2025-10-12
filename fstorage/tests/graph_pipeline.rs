@@ -1,17 +1,11 @@
 use deltalake::{
-    arrow::array::StringArray,
-    datafusion::execution::context::SessionContext,
-    open_table,
+    arrow::array::StringArray, datafusion::execution::context::SessionContext, open_table,
 };
 use fstorage::{
-    fetch::Fetchable,
-    schemas::generated_schemas::Project,
-    sync::DataSynchronizer,
-    utils,
+    fetch::Fetchable, schemas::generated_schemas::Project, sync::DataSynchronizer, utils,
 };
 use helix_db::{
-    helix_engine::storage_core::storage_methods::StorageMethods,
-    protocol::value::Value,
+    helix_engine::storage_core::storage_methods::StorageMethods, protocol::value::Value,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -69,7 +63,10 @@ async fn graph_pipeline_updates_delta_and_helix() -> anyhow::Result<()> {
         .config
         .lake_path
         .join(format!("silver/index/{}", Project::ENTITY_TYPE));
-    assert!(index_table_path.exists(), "index table directory should exist");
+    assert!(
+        index_table_path.exists(),
+        "index table directory should exist"
+    );
     let index_uri = index_table_path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("non-UTF8 index path"))?
@@ -97,10 +94,7 @@ async fn graph_pipeline_updates_delta_and_helix() -> anyhow::Result<()> {
         .as_any()
         .downcast_ref::<StringArray>()
         .expect("url column should be utf8");
-    assert_eq!(
-        url_column.value(0),
-        "https://github.com/example/repo"
-    );
+    assert_eq!(url_column.value(0), "https://github.com/example/repo");
 
     Ok(())
 }

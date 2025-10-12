@@ -16,10 +16,8 @@ async fn helix_and_delta_edge_queries_both_succeed() -> anyhow::Result<()> {
     // Prepare two function nodes that will be connected via Helix-managed edges.
     let from_name = "function::main";
     let to_name = "function::helper";
-    let from_node_id = utils::id::stable_node_id_u128(
-        Function::ENTITY_TYPE,
-        &[("name", from_name.to_string())],
-    );
+    let from_node_id =
+        utils::id::stable_node_id_u128(Function::ENTITY_TYPE, &[("name", from_name.to_string())]);
     let to_node_id =
         utils::id::stable_node_id_u128(Function::ENTITY_TYPE, &[("name", to_name.to_string())]);
 
@@ -114,9 +112,7 @@ async fn helix_and_delta_edge_queries_both_succeed() -> anyhow::Result<()> {
         .await?
         .expect("node should be retrievable via index");
     assert_eq!(
-        node_from_cold
-            .get("name")
-            .and_then(|value| value.as_str()),
+        node_from_cold.get("name").and_then(|value| value.as_str()),
         Some(to_name)
     );
 

@@ -1,12 +1,10 @@
 use crate::config::StorageConfig;
 use crate::errors::{Result, StorageError};
-use deltalake::DeltaTable;
-use deltalake::DeltaTableBuilder;
-use deltalake::ObjectStore;
+use crate::utils;
 use chrono::{DateTime, Utc};
 use deltalake::arrow::array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
-    StringArray, TimestampMicrosecondArray, UInt32Array, UInt64Array,
+    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
+    TimestampMicrosecondArray, UInt32Array, UInt64Array,
 };
 use deltalake::arrow::datatypes::DataType;
 use deltalake::arrow::record_batch::RecordBatch;
@@ -15,14 +13,17 @@ use deltalake::datafusion::execution::context::SessionContext;
 use deltalake::kernel::Action;
 use deltalake::protocol::SaveMode;
 use deltalake::storage::{ObjectStoreRef, Path as ObjectPath};
-use helix_db::helix_engine::storage_core::HelixGraphStorage;
+use deltalake::DeltaTable;
+use deltalake::DeltaTableBuilder;
+use deltalake::ObjectStore;
 use helix_db::helix_engine::storage_core::storage_methods::StorageMethods;
+use helix_db::helix_engine::storage_core::HelixGraphStorage;
 use helix_db::helix_engine::traversal_core::HelixGraphEngine;
 use helix_db::helix_engine::types::GraphError;
 use helix_db::protocol::value::Value as HelixValue;
 use helix_db::utils::items::{Edge, Node};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -48,6 +49,33 @@ async fn read_parquet_batches(
 pub struct Lake {
     pub(crate) config: StorageConfig,
     engine: Arc<HelixGraphEngine>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NeighborDirection {
+    Outgoing,
+    Incoming,
+    Both,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NeighborEdgeOrientation {
+    Outgoing,
+    Incoming,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NeighborRecord {
+    pub orientation: NeighborEdgeOrientation,
+    pub edge: HashMap<String, JsonValue>,
+    pub node_id: String,
+    pub node: Option<HashMap<String, JsonValue>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Subgraph {
+    pub nodes: Vec<HashMap<String, JsonValue>>,
+    pub edges: Vec<HashMap<String, JsonValue>>,
 }
 
 impl Lake {
@@ -363,7 +391,10 @@ impl Lake {
         result
     }
 
-    fn record_batch_row_to_map(batch: &RecordBatch, row: usize) -> Result<HashMap<String, JsonValue>> {
+    fn record_batch_row_to_map(
+        batch: &RecordBatch,
+        row: usize,
+    ) -> Result<HashMap<String, JsonValue>> {
         let schema = batch.schema();
         let mut map = HashMap::new();
         for (col_idx, field) in schema.fields().iter().enumerate() {
@@ -481,10 +512,7 @@ impl Lake {
             if column.is_null(0) {
                 pk_values.push((name.clone(), None));
             } else if let Some(value) = Self::arrow_cell_to_json(column, 0) {
-                pk_values.push((
-                    name.clone(),
-                    Self::json_value_to_string(&value),
-                ));
+                pk_values.push((name.clone(), Self::json_value_to_string(&value)));
             } else {
                 pk_values.push((name.clone(), None));
             }
@@ -581,6 +609,330 @@ impl Lake {
         Ok(None)
     }
 
+    pub async fn get_node_by_keys(
+        &self,
+        entity_type: &str,
+        primary_keys: &[(&str, &str)],
+    ) -> Result<Option<HashMap<String, JsonValue>>> {
+        if primary_keys.is_empty() {
+            return Err(StorageError::InvalidArg(
+                "primary_keys must not be empty for get_node_by_keys".into(),
+            ));
+        }
+
+        let key_values: Vec<(&str, String)> = primary_keys
+            .iter()
+            .map(|(key, value)| (*key, (*value).to_string()))
+            .collect();
+        let id_u128 = utils::id::stable_node_id_u128(entity_type, &key_values);
+        let id_string = Uuid::from_u128(id_u128).to_string();
+
+        if let Some(node) = self.get_node_by_id(&id_string, Some(entity_type)).await? {
+            return Ok(Some(node));
+        }
+
+        self.lookup_node_in_table_by_keys(entity_type, primary_keys, &id_string)
+            .await
+    }
+
+    pub async fn neighbors(
+        &self,
+        node_id: &str,
+        edge_types: Option<&[&str]>,
+        direction: NeighborDirection,
+        limit: usize,
+    ) -> Result<Vec<NeighborRecord>> {
+        let edge_filters = edge_types.map(|types| {
+            types
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<String>>()
+        });
+        let cap = if limit == 0 { usize::MAX } else { limit };
+
+        let mut collected: Vec<(HashMap<String, JsonValue>, NeighborEdgeOrientation)> = Vec::new();
+
+        match direction {
+            NeighborDirection::Outgoing => {
+                let edges = self
+                    .collect_adjacent_edges(node_id, edge_filters.as_deref(), Direction::Out)
+                    .await?;
+                Self::push_edges_with_cap(
+                    &mut collected,
+                    edges,
+                    NeighborEdgeOrientation::Outgoing,
+                    cap,
+                );
+            }
+            NeighborDirection::Incoming => {
+                let edges = self
+                    .collect_adjacent_edges(node_id, edge_filters.as_deref(), Direction::In)
+                    .await?;
+                Self::push_edges_with_cap(
+                    &mut collected,
+                    edges,
+                    NeighborEdgeOrientation::Incoming,
+                    cap,
+                );
+            }
+            NeighborDirection::Both => {
+                let outgoing = self
+                    .collect_adjacent_edges(node_id, edge_filters.as_deref(), Direction::Out)
+                    .await?;
+                Self::push_edges_with_cap(
+                    &mut collected,
+                    outgoing,
+                    NeighborEdgeOrientation::Outgoing,
+                    cap,
+                );
+                if collected.len() < cap {
+                    let incoming = self
+                        .collect_adjacent_edges(node_id, edge_filters.as_deref(), Direction::In)
+                        .await?;
+                    Self::push_edges_with_cap(
+                        &mut collected,
+                        incoming,
+                        NeighborEdgeOrientation::Incoming,
+                        cap,
+                    );
+                }
+            }
+        }
+
+        let mut results = Vec::new();
+        for (edge_map, orientation) in collected.into_iter() {
+            if results.len() >= cap {
+                break;
+            }
+
+            let neighbor_value = match orientation {
+                NeighborEdgeOrientation::Outgoing => edge_map.get("to_node_id"),
+                NeighborEdgeOrientation::Incoming => edge_map.get("from_node_id"),
+            };
+
+            let neighbor_id = match neighbor_value.and_then(|value| value.as_str()) {
+                Some(id) if !id.is_empty() => id.to_string(),
+                _ => continue,
+            };
+
+            let entity_type_hint = edge_map
+                .get("properties")
+                .and_then(|value| value.as_object())
+                .and_then(|props| match orientation {
+                    NeighborEdgeOrientation::Outgoing => props.get("to_node_type"),
+                    NeighborEdgeOrientation::Incoming => props.get("from_node_type"),
+                })
+                .and_then(|value| value.as_str())
+                .map(|s| s.to_string());
+
+            let node = self
+                .get_node_by_id(&neighbor_id, entity_type_hint.as_deref())
+                .await?;
+
+            results.push(NeighborRecord {
+                orientation,
+                edge: edge_map,
+                node_id: neighbor_id,
+                node,
+            });
+        }
+
+        Ok(results)
+    }
+
+    pub async fn subgraph_bfs(
+        &self,
+        start_id: &str,
+        edge_types: Option<&[&str]>,
+        depth: usize,
+        node_limit: usize,
+        edge_limit: usize,
+    ) -> Result<Subgraph> {
+        let start_uuid = Uuid::parse_str(start_id)
+            .map_err(|_| StorageError::InvalidArg(format!("Invalid node id '{}'", start_id)))?;
+
+        let node_cap = if node_limit == 0 {
+            usize::MAX
+        } else {
+            node_limit
+        };
+        let edge_cap = if edge_limit == 0 {
+            usize::MAX
+        } else {
+            edge_limit
+        };
+
+        let mut queue: VecDeque<(u128, usize)> = VecDeque::new();
+        queue.push_back((start_uuid.as_u128(), 0));
+
+        let mut visited_nodes: HashSet<u128> = HashSet::new();
+        let mut seen_edges: HashSet<u128> = HashSet::new();
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+
+        let allowed_edge_types = edge_types.map(|types| {
+            types
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<HashSet<String>>()
+        });
+
+        let txn = self.engine.storage.graph_env.read_txn()?;
+
+        while let Some((node_key, level)) = queue.pop_front() {
+            if visited_nodes.contains(&node_key) {
+                continue;
+            }
+
+            let node = match self.engine.storage.get_node(&txn, &node_key) {
+                Ok(node) => node,
+                Err(GraphError::NodeNotFound) => {
+                    return Err(StorageError::NotFound(format!(
+                        "Node '{}' was not found in Helix storage",
+                        Uuid::from_u128(node_key)
+                    )));
+                }
+                Err(other) => return Err(StorageError::from(other)),
+            };
+
+            nodes.push(Self::node_to_map(node));
+            visited_nodes.insert(node_key);
+
+            if node_cap != usize::MAX && nodes.len() >= node_cap {
+                break;
+            }
+
+            if level >= depth {
+                continue;
+            }
+
+            let prefix = node_key.to_be_bytes();
+            let iter = self
+                .engine
+                .storage
+                .out_edges_db
+                .prefix_iter(&txn, &prefix)?;
+
+            for entry in iter {
+                if edge_cap != usize::MAX && edges.len() >= edge_cap {
+                    break;
+                }
+
+                let (_raw_key, raw_value) = entry?;
+                let (edge_id, next_node_id) =
+                    HelixGraphStorage::unpack_adj_edge_data(raw_value.as_ref())?;
+                if seen_edges.contains(&edge_id) {
+                    continue;
+                }
+
+                let edge = match self.engine.storage.get_edge(&txn, &edge_id) {
+                    Ok(edge) => edge,
+                    Err(GraphError::EdgeNotFound) => continue,
+                    Err(other) => return Err(StorageError::from(other)),
+                };
+
+                if let Some(ref allowed) = allowed_edge_types {
+                    if !allowed.contains(&edge.label) {
+                        continue;
+                    }
+                }
+
+                edges.push(Self::edge_to_map(edge));
+                seen_edges.insert(edge_id);
+
+                if !visited_nodes.contains(&next_node_id) && level + 1 <= depth {
+                    queue.push_back((next_node_id, level + 1));
+                }
+
+                if edge_cap != usize::MAX && edges.len() >= edge_cap {
+                    break;
+                }
+            }
+
+            if edge_cap != usize::MAX && edges.len() >= edge_cap {
+                break;
+            }
+        }
+
+        Ok(Subgraph { nodes, edges })
+    }
+
+    pub async fn query_table(
+        &self,
+        table_name: &str,
+        filters: Option<&[(&str, &str)]>,
+        limit: Option<usize>,
+    ) -> Result<Vec<HashMap<String, JsonValue>>> {
+        let Some(table) = self.open_delta_table(table_name).await? else {
+            return Ok(Vec::new());
+        };
+
+        let ctx = SessionContext::new();
+        let alias = Self::sanitize_table_alias(table_name);
+        ctx.register_table(&alias, Arc::new(table))
+            .map_err(|e| StorageError::Other(e.into()))?;
+
+        let mut clauses = Vec::new();
+        if let Some(filters) = filters {
+            for (column, value) in filters {
+                let escaped_column = Self::escape_sql_identifier(column);
+                let escaped_value = Self::escape_sql_literal(value);
+                clauses.push(format!("{escaped_column} = '{escaped_value}'"));
+            }
+        }
+
+        let where_clause = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", clauses.join(" AND "))
+        };
+        let limit_clause = limit
+            .map(|value| format!(" LIMIT {}", value))
+            .unwrap_or_default();
+        let sql = format!("SELECT * FROM {alias}{where_clause}{limit_clause}");
+
+        let batches = ctx
+            .sql(&sql)
+            .await
+            .map_err(|e| StorageError::Other(e.into()))?
+            .collect()
+            .await
+            .map_err(|e| StorageError::Other(e.into()))?;
+
+        Self::record_batches_to_maps(&batches)
+    }
+
+    pub async fn table_sql(
+        &self,
+        table_name: &str,
+        sql: &str,
+    ) -> Result<Vec<HashMap<String, JsonValue>>> {
+        let Some(table) = self.open_delta_table(table_name).await? else {
+            return Ok(Vec::new());
+        };
+
+        let ctx = SessionContext::new();
+        let alias = Self::sanitize_table_alias(table_name);
+        ctx.register_table(&alias, Arc::new(table))
+            .map_err(|e| StorageError::Other(e.into()))?;
+
+        let final_sql = if sql.contains("{{table}}") {
+            sql.replace("{{table}}", &alias)
+        } else {
+            sql.to_string()
+        };
+
+        let batches = ctx
+            .sql(&final_sql)
+            .await
+            .map_err(|e| StorageError::Other(e.into()))?
+            .collect()
+            .await
+            .map_err(|e| StorageError::Other(e.into()))?;
+
+        Self::record_batches_to_maps(&batches)
+    }
+
     async fn get_adjacent_edges(
         &self,
         node_id: &str,
@@ -634,8 +986,7 @@ impl Lake {
         let mut edges = Vec::new();
         for entry in iter {
             let (_key, value) = entry?;
-            let (edge_id, other_node_id) =
-                HelixGraphStorage::unpack_adj_edge_data(value.as_ref())?;
+            let (edge_id, other_node_id) = HelixGraphStorage::unpack_adj_edge_data(value.as_ref())?;
             let edge = self.engine.storage.get_edge(&txn, &edge_id)?;
 
             let matches_direction = match direction {
@@ -729,6 +1080,110 @@ impl Lake {
         Ok(results)
     }
 
+    async fn collect_adjacent_edges(
+        &self,
+        node_id: &str,
+        edge_types: Option<&[String]>,
+        direction: Direction,
+    ) -> Result<Vec<HashMap<String, JsonValue>>> {
+        if let Some(types) = edge_types {
+            let mut edges = Vec::new();
+            for edge_type in types {
+                let mut batch = self
+                    .get_adjacent_edges(node_id, Some(edge_type.as_str()), direction)
+                    .await?;
+                edges.append(&mut batch);
+            }
+            Ok(edges)
+        } else {
+            self.get_adjacent_edges(node_id, None, direction).await
+        }
+    }
+
+    fn push_edges_with_cap(
+        target: &mut Vec<(HashMap<String, JsonValue>, NeighborEdgeOrientation)>,
+        edges: Vec<HashMap<String, JsonValue>>,
+        orientation: NeighborEdgeOrientation,
+        cap: usize,
+    ) {
+        for edge in edges {
+            if target.len() >= cap {
+                break;
+            }
+            target.push((edge, orientation));
+        }
+    }
+
+    async fn open_delta_table(&self, table_name: &str) -> Result<Option<DeltaTable>> {
+        let table_path = self.config.lake_path.join(table_name);
+        if tokio::fs::metadata(&table_path).await.is_err() {
+            return Ok(None);
+        }
+        let table_uri = match table_path.to_str() {
+            Some(uri) => uri,
+            None => return Ok(None),
+        };
+
+        match deltalake::open_table(table_uri).await {
+            Ok(table) => Ok(Some(table)),
+            Err(deltalake::DeltaTableError::NotATable(_)) => Ok(None),
+            Err(e) => Err(StorageError::from(e)),
+        }
+    }
+
+    async fn lookup_node_in_table_by_keys(
+        &self,
+        entity_type: &str,
+        primary_keys: &[(&str, &str)],
+        computed_id: &str,
+    ) -> Result<Option<HashMap<String, JsonValue>>> {
+        let table_name = format!("silver/entities/{}", entity_type);
+        let Some(table) = self.open_delta_table(&table_name).await? else {
+            return Ok(None);
+        };
+
+        let ctx = SessionContext::new();
+        let alias = Self::sanitize_table_alias(&table_name);
+        ctx.register_table(&alias, Arc::new(table))
+            .map_err(|e| StorageError::Other(e.into()))?;
+
+        let mut predicates = Vec::new();
+        for (column, value) in primary_keys {
+            let escaped_column = Self::escape_sql_identifier(column);
+            let escaped_value = Self::escape_sql_literal(value);
+            predicates.push(format!("{escaped_column} = '{escaped_value}'"));
+        }
+        if predicates.is_empty() {
+            return Ok(None);
+        }
+        let where_clause = predicates.join(" AND ");
+        let sql = format!("SELECT * FROM {alias} WHERE {where_clause} LIMIT 1");
+
+        let batches = ctx
+            .sql(&sql)
+            .await
+            .map_err(|e| StorageError::Other(e.into()))?
+            .collect()
+            .await
+            .map_err(|e| StorageError::Other(e.into()))?;
+
+        if batches.is_empty() {
+            return Ok(None);
+        }
+
+        for batch in &batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let mut map = Self::record_batch_row_to_map(batch, 0)?;
+            map.entry("id".to_string())
+                .or_insert_with(|| JsonValue::String(computed_id.to_string()));
+            return Ok(Some(map));
+        }
+
+        Ok(None)
+    }
+
     fn record_batches_to_edge_maps(
         batches: &[RecordBatch],
         label: &str,
@@ -772,6 +1227,45 @@ impl Lake {
         Ok(edges)
     }
 
+    fn record_batches_to_maps(batches: &[RecordBatch]) -> Result<Vec<HashMap<String, JsonValue>>> {
+        let mut rows = Vec::new();
+        for batch in batches {
+            for row in 0..batch.num_rows() {
+                rows.push(Self::record_batch_row_to_map(batch, row)?);
+            }
+        }
+        Ok(rows)
+    }
+
+    fn sanitize_table_alias(table_name: &str) -> String {
+        let candidate: String = table_name
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect();
+        if candidate.is_empty() {
+            "table".to_string()
+        } else {
+            candidate
+        }
+    }
+
+    fn escape_sql_literal(value: &str) -> String {
+        value.replace('\'', "''")
+    }
+
+    fn escape_sql_identifier(identifier: &str) -> String {
+        let mut escaped = String::with_capacity(identifier.len() + 2);
+        escaped.push('"');
+        for ch in identifier.chars() {
+            if ch == '"' {
+                escaped.push('"');
+            }
+            escaped.push(ch);
+        }
+        escaped.push('"');
+        escaped
+    }
+
     fn arrow_cell_to_json(column: &ArrayRef, row_idx: usize) -> Option<JsonValue> {
         match column.data_type() {
             DataType::Utf8 => {
@@ -796,8 +1290,7 @@ impl Lake {
             }
             DataType::Float64 => {
                 let arr = column.as_any().downcast_ref::<Float64Array>()?;
-                serde_json::Number::from_f64(arr.value(row_idx))
-                    .map(JsonValue::Number)
+                serde_json::Number::from_f64(arr.value(row_idx)).map(JsonValue::Number)
             }
             DataType::Float32 => {
                 let arr = column.as_any().downcast_ref::<Float32Array>()?;
