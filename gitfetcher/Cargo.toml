@@ -4,16 +4,19 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-octocrab = "0.45"
-tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+deltalake = { version = "0.17.0", features = ["datafusion"] }
+fstorage = { path = "../fstorage" }
+log = "0.4"
+octocrab = { version = "0.45", default-features = false, features = ["rustls", "default-client"] }
+rustworkx-core = "0.17.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-csv = "1.1"
 thiserror = "1.0"
-anyhow = "1.0"
-tempfile = "3.0"
-chrono = { version = "0.4", features = ["serde"] }
-
-[[bin]]
-name = "gitfetcher"
-path = "src/main.rs"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1.18.1", features = ["serde", "v4", "v5"] }
+ast = { git = "https://github.com/stakwork/stakgraph.git", package = "ast" }
+tempfile = "3.10.1"
+base64 = "0.22"
