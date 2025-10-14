@@ -375,5 +375,27 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated.last_version, 5);
+
+        catalog
+            .ensure_ingestion_offset(
+                "silver/vectors/readme_chunk",
+                "readme_chunk",
+                crate::fetch::EntityCategory::Vector,
+                &vec!["embedding_id".to_string()],
+            )
+            .unwrap();
+
+        let vector_offset = catalog
+            .get_ingestion_offset("silver/vectors/readme_chunk")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            vector_offset.category,
+            crate::fetch::EntityCategory::Vector
+        );
+        assert_eq!(vector_offset.primary_keys, vec!["embedding_id".to_string()]);
+
+        let list = catalog.list_ingestion_offsets().unwrap();
+        assert_eq!(list.len(), 2);
     }
 }

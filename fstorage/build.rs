@@ -64,6 +64,11 @@ fn main() -> anyhow::Result<()> {
             generate_edge_struct(&mut file, edge_schema)?;
             writeln!(file, "")?;
         }
+
+        for vector_schema in &latest_schema.vector_schemas {
+            generate_vector_struct(&mut file, vector_schema)?;
+            writeln!(file, "")?;
+        }
     }
 
     Ok(())
@@ -102,6 +107,196 @@ fn generate_edge_struct(
     // Generate Fetchable implementation for edge
     generate_edge_fetchable_impl(file, edge_name, from_type, to_type, &edge_schema.properties)?;
 
+    Ok(())
+}
+
+fn generate_vector_struct(
+    file: &mut File,
+    vector_schema: &helix_db::helixc::parser::types::VectorSchema,
+) -> anyhow::Result<()> {
+    let struct_name = vector_schema.name.to_upper_camel_case();
+    writeln!(file, "#[derive(Debug, Serialize, Deserialize, Clone)]")?;
+    writeln!(file, "pub struct {} {{", struct_name)?;
+    for field in &vector_schema.fields {
+        let field_name = &field.name;
+        let field_type = map_type_to_rust(&field.field_type);
+        writeln!(file, "    pub {}: {},", field_name, field_type)?;
+    }
+    writeln!(file, "    pub text: Option<String>,")?;
+    writeln!(file, "    pub embedding: Option<Vec<f32>>,")?;
+    writeln!(file, "    pub embedding_model: Option<String>,")?;
+    writeln!(file, "    pub embedding_id: Option<String>,")?;
+    writeln!(file, "    pub token_count: Option<i32>,")?;
+    writeln!(file, "    pub chunk_order: Option<i32>,")?;
+    writeln!(file, "    pub created_at: Option<DateTime<Utc>>,")?;
+    writeln!(file, "    pub updated_at: Option<DateTime<Utc>>,")?;
+    writeln!(file, "}}")?;
+    writeln!(file, "")?;
+
+    generate_vector_fetchable_impl(file, &struct_name, &vector_schema.fields)?;
+    Ok(())
+}
+
+fn generate_vector_fetchable_impl(
+    file: &mut File,
+    struct_name: &str,
+    fields: &[helix_db::helixc::parser::types::Field],
+) -> anyhow::Result<()> {
+    let extra_fields = [
+        ("text", "Option<String>", "DataType::Utf8"),
+        (
+            "embedding",
+            "Option<Vec<f32>>",
+            "DataType::List(Arc::new(Field::new(\"item\", DataType::Float32, true)))",
+        ),
+        ("embedding_model", "Option<String>", "DataType::Utf8"),
+        ("embedding_id", "Option<String>", "DataType::Utf8"),
+        ("token_count", "Option<i32>", "DataType::Int32"),
+        ("chunk_order", "Option<i32>", "DataType::Int32"),
+        (
+            "created_at",
+            "Option<DateTime<Utc>>",
+            "DataType::Timestamp(deltalake::arrow::datatypes::TimeUnit::Microsecond, Some(\"UTC\".into()))",
+        ),
+        (
+            "updated_at",
+            "Option<DateTime<Utc>>",
+            "DataType::Timestamp(deltalake::arrow::datatypes::TimeUnit::Microsecond, Some(\"UTC\".into()))",
+        ),
+    ];
+
+    writeln!(file, "impl Fetchable for {} {{", struct_name)?;
+    writeln!(
+        file,
+        "    const ENTITY_TYPE: &'static str = \"{}\";",
+        struct_name.to_lowercase()
+    )?;
+    writeln!(file, "")?;
+
+    writeln!(file, "    fn table_name() -> String {{")?;
+    writeln!(
+        file,
+        "        format!(\"silver/vectors/{{}}\", Self::ENTITY_TYPE)"
+    )?;
+    writeln!(file, "    }}")?;
+    writeln!(file, "")?;
+
+    writeln!(file, "    fn primary_keys() -> Vec<&'static str> {{")?;
+    writeln!(file, "        vec![\"embedding_id\"]")?;
+    writeln!(file, "    }}")?;
+    writeln!(file, "")?;
+
+    writeln!(file, "    fn category() -> EntityCategory {{")?;
+    writeln!(file, "        EntityCategory::Vector")?;
+    writeln!(file, "    }}")?;
+    writeln!(file, "")?;
+
+    writeln!(
+        file,
+        "    fn to_record_batch(data: impl IntoIterator<Item = Self>) -> crate::errors::Result<deltalake::arrow::record_batch::RecordBatch> {{"
+    )?;
+    writeln!(
+        file,
+        "        let data: Vec<Self> = data.into_iter().collect();"
+    )?;
+    writeln!(file, "        if data.is_empty() {{")?;
+    writeln!(
+        file,
+        "            use deltalake::arrow::datatypes::{{Field, Schema, DataType}};"
+    )?;
+    writeln!(file, "            let schema = Schema::new(vec![")?;
+    for field in fields {
+        let arrow_type = map_to_arrow_type(&field.field_type);
+        writeln!(
+            file,
+            "                Field::new(\"{0}\", {1}, true),",
+            field.name, arrow_type
+        )?;
+    }
+    for (name, _, arrow_type) in &extra_fields {
+        writeln!(
+            file,
+            "                Field::new(\"{0}\", {1}, true),",
+            name, arrow_type
+        )?;
+    }
+    writeln!(file, "            ]);")?;
+    writeln!(
+        file,
+        "            return Ok(deltalake::arrow::record_batch::RecordBatch::new_empty(Arc::new(schema)));"
+    )?;
+    writeln!(file, "        }}")?;
+    writeln!(file, "")?;
+
+    writeln!(file, "        // Collect field data")?;
+    for field in fields {
+        let field_type_str = map_type_to_rust(&field.field_type);
+        writeln!(
+            file,
+            "        let {0}_data: Vec<{1}> = data.iter().map(|item| item.{0}.clone()).collect();",
+            field.name, field_type_str
+        )?;
+    }
+    for (name, rust_type, _) in &extra_fields {
+        writeln!(
+            file,
+            "        let {0}_data: Vec<{1}> = data.iter().map(|item| item.{0}.clone()).collect();",
+            name, rust_type
+        )?;
+    }
+    writeln!(file, "")?;
+
+    writeln!(file, "        // Create Arrow arrays")?;
+    writeln!(file, "        let mut arrays = Vec::new();")?;
+    for field in fields {
+        writeln!(
+            file,
+            "        arrays.push(crate::auto_fetchable::to_arrow_array({}_data)?);",
+            field.name
+        )?;
+    }
+    for (name, _, _) in &extra_fields {
+        writeln!(
+            file,
+            "        arrays.push(crate::auto_fetchable::to_arrow_array({}_data)?);",
+            name
+        )?;
+    }
+    writeln!(file, "")?;
+
+    writeln!(
+        file,
+        "        use deltalake::arrow::datatypes::{{Field, Schema, DataType}};"
+    )?;
+    writeln!(file, "        let schema = Schema::new(vec![")?;
+    for field in fields {
+        let arrow_type = map_to_arrow_type(&field.field_type);
+        writeln!(
+            file,
+            "            Field::new(\"{0}\", {1}, true),",
+            field.name, arrow_type
+        )?;
+    }
+    for (name, _, arrow_type) in &extra_fields {
+        writeln!(
+            file,
+            "            Field::new(\"{0}\", {1}, true),",
+            name, arrow_type
+        )?;
+    }
+    writeln!(file, "        ]);")?;
+    writeln!(file, "")?;
+
+    writeln!(
+        file,
+        "        deltalake::arrow::record_batch::RecordBatch::try_new(Arc::new(schema), arrays)"
+    )?;
+    writeln!(
+        file,
+        "            .map_err(|e| crate::errors::StorageError::Arrow(e.into()))"
+    )?;
+    writeln!(file, "    }}")?;
+    writeln!(file, "}}")?;
     Ok(())
 }
 

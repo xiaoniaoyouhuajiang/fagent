@@ -9,6 +9,7 @@ use serde_json::Value as JsonValue;
 pub enum EntityCategory {
     Node,
     Edge,
+    Vector,
 }
 
 impl EntityCategory {
@@ -16,6 +17,7 @@ impl EntityCategory {
         match self {
             EntityCategory::Node => "node",
             EntityCategory::Edge => "edge",
+            EntityCategory::Vector => "vector",
         }
     }
 }
@@ -27,6 +29,7 @@ impl std::str::FromStr for EntityCategory {
         match s {
             "node" | "Node" => Ok(EntityCategory::Node),
             "edge" | "Edge" => Ok(EntityCategory::Edge),
+            "vector" | "Vector" => Ok(EntityCategory::Vector),
             other => Err(crate::errors::StorageError::InvalidArg(format!(
                 "Unknown entity category '{}'",
                 other

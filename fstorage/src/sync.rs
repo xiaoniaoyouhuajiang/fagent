@@ -10,7 +10,7 @@ use crate::utils;
 use async_trait::async_trait;
 use bincode;
 use chrono::Utc;
-use deltalake::arrow::array::{Array, StringArray};
+use deltalake::arrow::array::{Array, Float32Array, ListArray, StringArray};
 use deltalake::arrow::datatypes::{DataType, Field, Schema};
 use deltalake::arrow::record_batch::RecordBatch;
 use helix_db::{
@@ -22,9 +22,11 @@ use helix_db::{
                 g::G,
                 source::{e_from_id::EFromIdAdapter, n_from_id::NFromIdAdapter},
                 util::update::UpdateAdapter,
+                vectors::insert::InsertVAdapter,
             },
             HelixGraphEngine,
         },
+        vector_core::vector::HVector,
     },
     protocol::value::Value,
     utils::{
@@ -32,6 +34,7 @@ use helix_db::{
         label_hash::hash_label,
     },
 };
+use heed3::RoTxn;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
@@ -274,6 +277,64 @@ impl FStorageSynchronizer {
                             entity_type
                         );
                     }
+                }
+            }
+            EntityCategory::Vector => {
+                for i in 0..batch.num_rows() {
+                    let mut properties = HashMap::new();
+                    let mut embedding: Option<Vec<f64>> = None;
+
+                    for (field, column) in schema.fields().iter().zip(batch.columns()) {
+                        if field.name() == "embedding" {
+                            let list_array = column.as_any().downcast_ref::<ListArray>();
+                            if let Some(list_array) = list_array {
+                                if !list_array.is_null(i) {
+                                    let values = list_array.value(i);
+                                    let float_array = values
+                                        .as_any()
+                                        .downcast_ref::<Float32Array>()
+                                        .expect("embedding list should contain f32 values");
+                                    let mut vec = Vec::with_capacity(float_array.len());
+                                    for idx in 0..float_array.len() {
+                                        vec.push(float_array.value(idx) as f64);
+                                    }
+                                    embedding = Some(vec);
+                                }
+                            }
+                        } else if let Some(value) = Self::arrow_value_to_helix_value(column, i) {
+                            properties.insert(field.name().clone(), value);
+                        }
+                    }
+
+                    let Some(embedding_vec) = embedding else {
+                        log::warn!(
+                            "Skipping vector of type '{}' at row {} due to missing embedding values",
+                            entity_type,
+                            i
+                        );
+                        continue;
+                    };
+
+                    if embedding_vec.is_empty() {
+                        log::warn!(
+                            "Skipping vector of type '{}' at row {} because embedding is empty",
+                            entity_type,
+                            i
+                        );
+                        continue;
+                    }
+
+                    let props_vec: Vec<(String, Value)> =
+                        properties.into_iter().collect();
+                    let fields_opt = if props_vec.is_empty() {
+                        None
+                    } else {
+                        Some(props_vec)
+                    };
+
+                    let _ = G::new_mut(self.engine.storage.clone(), &mut txn)
+                        .insert_v::<fn(&HVector, &RoTxn) -> bool>(&embedding_vec, entity_type, fields_opt)
+                        .collect_to::<Vec<_>>();
                 }
             }
             EntityCategory::Edge => {
@@ -528,7 +589,7 @@ impl DataSynchronizer for FStorageSynchronizer {
                         .to_lowercase();
                     format!("silver/edges/{}", edge_suffix)
                 }
-                EntityCategory::Node => fetchable_collection.table_name(),
+                _ => fetchable_collection.table_name(),
             };
             let merge_keys: Vec<String> = fetchable_collection
                 .primary_keys_any()
@@ -822,9 +883,10 @@ mod tests {
     use crate::config::StorageConfig;
     use crate::embedding::NullEmbeddingProvider;
     use crate::fetch::Fetchable;
-    use crate::schemas::generated_schemas::Project;
+    use crate::schemas::generated_schemas::{Project, ReadmeChunk};
     use helix_db::helix_engine::traversal_core::HelixGraphEngineOpts;
     use tempfile::tempdir;
+    use chrono::Utc;
 
     #[tokio::test]
     async fn test_run_full_etl_updates_offsets() {
@@ -863,6 +925,20 @@ mod tests {
             language: None,
             stars: None,
             forks: None,
+        }]);
+
+        graph_data.add_entities(vec![ReadmeChunk {
+            source_file: Some("README.md".to_string()),
+            start_line: Some(1),
+            end_line: Some(5),
+            text: Some("alpha project".to_string()),
+            embedding: Some(vec![0.5_f32, 0.25_f32, 0.25_f32]),
+            embedding_model: Some("fixture".to_string()),
+            embedding_id: Some("alpha-readme-1".to_string()),
+            token_count: Some(4),
+            chunk_order: Some(0),
+            created_at: Some(Utc::now()),
+            updated_at: None,
         }]);
 
         synchronizer.process_graph_data(graph_data).await.unwrap();

@@ -155,6 +155,29 @@ impl ToArrowArray for Vec<i64> {
     }
 }
 
+impl ToArrowArray for Vec<f32> {
+    fn to_arrow_array(values: Vec<Option<Self>>) -> Arc<dyn Array> {
+        let mut builder = ListBuilder::new(Float32Builder::new());
+        for value in values {
+            match value {
+                Some(vec) => {
+                    {
+                        let values_builder = builder.values();
+                        for v in vec {
+                            values_builder.append_value(v);
+                        }
+                    }
+                    builder.append(true);
+                }
+                None => {
+                    builder.append(false);
+                }
+            }
+        }
+        Arc::new(builder.finish())
+    }
+}
+
 // 为 serde_json::Value 实现转换
 impl ToArrowArray for serde_json::Value {
     fn to_arrow_array(values: Vec<Option<Self>>) -> Arc<dyn Array> {
