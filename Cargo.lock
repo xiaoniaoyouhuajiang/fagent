@@ -2667,6 +2667,7 @@ dependencies = [
  "chrono",
  "deltalake",
  "fstorage",
+ "git2",
  "log",
  "octocrab",
  "rustworkx-core",

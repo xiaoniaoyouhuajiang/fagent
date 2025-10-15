@@ -1,4 +1,5 @@
 pub mod client;
+pub mod code_workspace;
 pub mod error;
 pub mod fetcher;
 pub mod mapper;

@@ -20,3 +20,4 @@ uuid = { version = "1.18.1", features = ["serde", "v4", "v5"] }
 ast = { git = "https://github.com/stakwork/stakgraph.git", package = "ast" }
 tempfile = "3.10.1"
 base64 = "0.22"
+git2 = "0.20"
