@@ -182,7 +182,7 @@ fn generate_vector_fetchable_impl(
     writeln!(file, "")?;
 
     writeln!(file, "    fn primary_keys() -> Vec<&'static str> {{")?;
-    writeln!(file, "        vec![\"embedding_id\"]")?;
+    writeln!(file, "        vec![\"id\"]")?;
     writeln!(file, "    }}")?;
     writeln!(file, "")?;
 

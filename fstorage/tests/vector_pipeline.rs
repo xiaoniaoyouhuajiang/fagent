@@ -8,7 +8,16 @@ use fstorage::{
 use heed3::RoTxn;
 use helix_db::{
     helix_engine::traversal_core::ops::vectors::search::SearchVAdapter,
-    helix_engine::{traversal_core::ops::g::G, vector_core::vector::HVector},
+    helix_engine::{
+        traversal_core::ops::g::G,
+        vector_core::vector::HVector,
+        traversal_core::traversal_value::Traversable,
+    },
+    helix_engine::traversal_core::ops::out::out::OutAdapter,
+    helix_engine::traversal_core::ops::source::{
+        add_e::EdgeType,
+        n_from_id::NFromIdAdapter,
+    },
 };
 
 mod common;
@@ -30,6 +39,9 @@ async fn vector_pipeline_persists_to_lake_and_engine() -> anyhow::Result<()> {
     let embedding_values = vec![0.1_f32, 0.2_f32, 0.3_f32];
     let embedding_id = "readme-chunk-1".to_string();
     let readme_chunk = ReadmeChunk {
+        id: None,
+        project_url: Some(project_url.clone()),
+        revision_sha: Some("abc123".to_string()),
         source_file: Some("README.md".to_string()),
         start_line: Some(1),
         end_line: Some(20),
@@ -71,17 +83,33 @@ async fn vector_pipeline_persists_to_lake_and_engine() -> anyhow::Result<()> {
         .find(|offset| offset.table_path.ends_with("readmechunk"))
         .expect("vector offset registered");
     assert_eq!(vector_offset.category, EntityCategory::Vector);
-    assert_eq!(vector_offset.primary_keys, vec!["embedding_id".to_string()]);
+    assert_eq!(vector_offset.primary_keys, vec!["id".to_string()]);
+
+    let contains_content_offset = offsets
+        .iter()
+        .find(|offset| offset.table_path.ends_with("containscontent"));
+    assert!(contains_content_offset.is_some(), "contains_content offset registered");
 
     let txn = ctx.engine.storage.graph_env.read_txn()?;
     let query: Vec<f64> = embedding_values.iter().map(|v| *v as f64).collect();
-    let results = G::new(ctx.engine.storage.clone(), &txn)
+    let vector_value = G::new(ctx.engine.storage.clone(), &txn)
         .search_v::<fn(&HVector, &RoTxn) -> bool, _>(&query, 10, ReadmeChunk::ENTITY_TYPE, None)
-        .collect_to::<Vec<_>>();
+        .collect_to_obj();
+    let vector_uuid = vector_value.uuid();
+    let project_id_u128 = fstorage::utils::id::stable_node_id_u128(
+        Project::ENTITY_TYPE,
+        &[("url", project_url.clone())],
+    );
 
+    let neighbors = G::new(ctx.engine.storage.clone(), &txn)
+        .n_from_id(&project_id_u128)
+        .out("edge_containscontent", &EdgeType::Vec)
+        .collect_to::<Vec<_>>();
     assert!(
-        !results.is_empty(),
-        "vector search returns at least one result"
+        neighbors
+            .into_iter()
+            .any(|value| value.uuid() == vector_uuid),
+        "project connects to vector via contains_content edge"
     );
 
     Ok(())

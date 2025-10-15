@@ -128,6 +128,9 @@ pub async fn build_repo_snapshot_graph(
                     embedding_identifier(&repo.full_name, &revision.sha, start_line, end_line, idx);
 
                 readme_chunks.push(ReadmeChunk {
+                    id: None,
+                    project_url: Some(project_url.clone()),
+                    revision_sha: Some(revision.sha.clone()),
                     source_file: Some(readme.source_file.clone()),
                     start_line: Some(start_line),
                     end_line: Some(end_line),

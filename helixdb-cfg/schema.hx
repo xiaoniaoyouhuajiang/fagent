@@ -121,6 +121,9 @@ schema::3 {
 
     // Represents a chunk of a README file for semantic search
     V::README_CHUNK {
+        id: String,
+        project_url: String,
+        revision_sha: String,
         source_file: String DEFAULT "README.md",
         start_line: I32,
         end_line: I32,
@@ -128,7 +131,9 @@ schema::3 {
 
     // Represents an embedding of a code entity's body/documentation
     V::CODE_CHUNK {
+        id: String,
         source_node_key: String,    // Unique key of the source N::FUNCTION or N::CLASS
+        source_node_id: String,
         language: String,
     }
 

@@ -3,14 +3,16 @@ use crate::catalog::Catalog;
 use crate::errors::{Result, StorageError};
 use crate::fetch::{
     EntityCategory, FetchResponse, Fetcher, FetcherCapability, GraphData, ProbeReport,
+    Fetchable,
 };
 use crate::lake::Lake;
 use crate::models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext};
+use crate::schemas::generated_schemas::{ContainsContent, Project, ReadmeChunk};
 use crate::utils;
 use async_trait::async_trait;
 use bincode;
-use chrono::Utc;
-use deltalake::arrow::array::{Array, Float32Array, ListArray, StringArray};
+use chrono::{DateTime, Utc};
+use deltalake::arrow::array::{Array, Float32Array, ListArray, StringArray, TimestampMicrosecondArray};
 use deltalake::arrow::datatypes::{DataType, Field, Schema};
 use deltalake::arrow::record_batch::RecordBatch;
 use heed3::RoTxn;
@@ -26,6 +28,7 @@ use helix_db::{
                 util::update::UpdateAdapter,
                 vectors::insert::InsertVAdapter,
             },
+            traversal_value::Traversable,
         },
         vector_core::vector::HVector,
     },
@@ -572,6 +575,230 @@ impl FStorageSynchronizer {
 
         Ok(Some(batch))
     }
+
+    async fn process_vector_collection(
+        &self,
+        _fetchable_collection: Box<dyn crate::fetch::AnyFetchable>,
+        mut record_batch: RecordBatch,
+        entity_type: &str,
+        table_name: String,
+        merge_keys: Vec<String>,
+    ) -> Result<()> {
+        let schema = record_batch.schema();
+        let num_rows = record_batch.num_rows();
+
+        if num_rows == 0 {
+            let merge_on = if merge_keys.is_empty() {
+                None
+            } else {
+                Some(merge_keys.clone())
+            };
+            self.lake
+                .write_batches(&table_name, vec![record_batch], merge_on)
+                .await?;
+            self.catalog.ensure_ingestion_offset(
+                &table_name,
+                entity_type,
+                crate::fetch::EntityCategory::Vector,
+                &merge_keys,
+            )?;
+            return Ok(());
+        }
+
+        let id_idx = schema.column_with_name("id").map(|(idx, _)| idx);
+        let created_at_idx = schema.column_with_name("created_at").map(|(idx, _)| idx);
+
+        let columns = record_batch.columns();
+
+        let mut vector_ids: Vec<Option<String>> = Vec::with_capacity(num_rows);
+        let mut contains_content_edges: Vec<ContainsContent> = Vec::new();
+
+        let mut txn = self.engine.storage.graph_env.write_txn()?;
+
+        for row in 0..num_rows {
+            let mut properties = HashMap::new();
+            let mut embedding: Option<Vec<f64>> = None;
+            let mut project_url: Option<String> = None;
+            let mut row_created_at: Option<DateTime<Utc>> = None;
+
+            let existing_id = id_idx.and_then(|idx| {
+                columns[idx]
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .and_then(|arr| {
+                        if arr.is_null(row) {
+                            None
+                        } else {
+                            Some(arr.value(row).to_string())
+                        }
+                    })
+            });
+
+            if let Some(idx) = created_at_idx {
+                if let Some(arr) = columns[idx]
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                {
+                    if !arr.is_null(row) {
+                        let value = arr.value(row);
+                        let seconds = value.div_euclid(1_000_000);
+                        let micros = (value.rem_euclid(1_000_000)) as u32;
+                        if let Some(datetime) =
+                            DateTime::<Utc>::from_timestamp(seconds, micros * 1000)
+                        {
+                            row_created_at = Some(datetime);
+                        }
+                    }
+                }
+            }
+
+            for (field, column) in schema.fields().iter().zip(columns.iter()) {
+                match field.name().as_str() {
+                    "embedding" => {
+                        let list_array = column.as_any().downcast_ref::<ListArray>();
+                        if let Some(list_array) = list_array {
+                            if !list_array.is_null(row) {
+                                let values = list_array.value(row);
+                                let float_array = values
+                                    .as_any()
+                                    .downcast_ref::<Float32Array>()
+                                    .expect("embedding list should contain f32 values");
+                                let mut vec = Vec::with_capacity(float_array.len());
+                                for idx in 0..float_array.len() {
+                                    vec.push(float_array.value(idx) as f64);
+                                }
+                                embedding = Some(vec);
+                            }
+                        }
+                    }
+                    "id" => {
+                        // handled separately
+                    }
+                    "project_url" => {
+                        if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
+                            if !arr.is_null(row) {
+                                project_url = Some(arr.value(row).to_string());
+                                properties.insert(
+                                    field.name().clone(),
+                                    Value::String(arr.value(row).to_string()),
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some(value) = Self::arrow_value_to_helix_value(column, row) {
+                            properties.insert(field.name().clone(), value);
+                        }
+                    }
+                }
+            }
+
+            let Some(embedding_vec) = embedding else {
+                log::warn!(
+                    "Skipping vector of type '{}' at row {} due to missing embedding values",
+                    entity_type,
+                    row
+                );
+                vector_ids.push(existing_id);
+                continue;
+            };
+
+            if embedding_vec.is_empty() {
+                log::warn!(
+                    "Skipping vector of type '{}' at row {} because embedding is empty",
+                    entity_type,
+                    row
+                );
+                vector_ids.push(existing_id);
+                continue;
+            }
+
+            let props_vec: Vec<(String, Value)> = properties.into_iter().collect();
+            let fields_opt = if props_vec.is_empty() {
+                None
+            } else {
+                Some(props_vec)
+            };
+
+            let traversal = G::new_mut(self.engine.storage.clone(), &mut txn)
+                .insert_v::<fn(&HVector, &RoTxn) -> bool>(&embedding_vec, entity_type, fields_opt)
+                .collect_to_obj();
+            let vector_uuid = traversal.uuid();
+            vector_ids.push(Some(vector_uuid.clone()));
+
+            if entity_type == ReadmeChunk::ENTITY_TYPE {
+                if let Some(project_url) = project_url.clone() {
+                    let project_id = utils::id::stable_node_id_u128(
+                        Project::ENTITY_TYPE,
+                        &[("url", project_url.clone())],
+                    );
+                    let project_uuid = Uuid::from_u128(project_id).to_string();
+                    let edge_id = utils::id::stable_edge_id_u128(
+                        ContainsContent::ENTITY_TYPE,
+                        &project_uuid,
+                        &vector_uuid,
+                    );
+                    let edge_timestamp = row_created_at.clone();
+                    contains_content_edges.push(ContainsContent {
+                        id: Some(Uuid::from_u128(edge_id).to_string()),
+                        from_node_id: Some(project_uuid),
+                        to_node_id: Some(vector_uuid.clone()),
+                        from_node_type: Some(Project::ENTITY_TYPE.to_string()),
+                        to_node_type: Some(ReadmeChunk::ENTITY_TYPE.to_string()),
+                        created_at: edge_timestamp.clone(),
+                        updated_at: edge_timestamp,
+                    });
+                }
+            }
+        }
+
+        txn.commit()?;
+
+        if let Some(idx) = id_idx {
+            let id_array = auto_fetchable::to_arrow_array(vector_ids)?;
+            let mut columns = record_batch.columns().to_vec();
+            columns[idx] = id_array;
+            record_batch = RecordBatch::try_new(schema.clone(), columns)?;
+        }
+
+        let merge_on = if merge_keys.is_empty() {
+            None
+        } else {
+            Some(merge_keys.clone())
+        };
+        self.lake
+            .write_batches(&table_name, vec![record_batch.clone()], merge_on)
+            .await?;
+        self.catalog.ensure_ingestion_offset(
+            &table_name,
+            entity_type,
+            crate::fetch::EntityCategory::Vector,
+            &merge_keys,
+        )?;
+
+        if !contains_content_edges.is_empty() {
+            let edge_batch = ContainsContent::to_record_batch(contains_content_edges.clone())?;
+            let edge_table = format!(
+                "silver/edges/{}",
+                ContainsContent::ENTITY_TYPE
+                    .strip_prefix("edge_")
+                    .unwrap_or(ContainsContent::ENTITY_TYPE)
+                    .to_lowercase()
+            );
+            self.lake
+                .write_batches(&edge_table, vec![edge_batch.clone()], Some(vec!["id".to_string()]))
+                .await?;
+            self.catalog.ensure_ingestion_offset(
+                &edge_table,
+                ContainsContent::ENTITY_TYPE,
+                crate::fetch::EntityCategory::Edge,
+                &vec!["id".to_string()],
+            )?;
+            self.update_engine_from_batch(Box::new(contains_content_edges), &edge_batch)?;
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -580,8 +807,6 @@ impl DataSynchronizer for FStorageSynchronizer {
         // --- STAGE 2: Persistence - Process all entities (original and newly created) ---
         for fetchable_collection in graph_data.entities {
             let record_batch = fetchable_collection.to_record_batch_any()?;
-
-            // Cold Path: Write to Data Lake
             let entity_type = fetchable_collection.entity_type_any();
             let category = fetchable_collection.category_any();
             let table_name = match category {
@@ -599,6 +824,19 @@ impl DataSynchronizer for FStorageSynchronizer {
                 .into_iter()
                 .map(|k| k.to_string())
                 .collect();
+
+            if matches!(category, EntityCategory::Vector) {
+                self.process_vector_collection(
+                    fetchable_collection,
+                    record_batch,
+                    entity_type,
+                    table_name,
+                    merge_keys,
+                )
+                .await?;
+                continue;
+            }
+
             let merge_on = if merge_keys.is_empty() {
                 None
             } else {
@@ -931,6 +1169,9 @@ mod tests {
         }]);
 
         graph_data.add_entities(vec![ReadmeChunk {
+            id: None,
+            project_url: Some("https://example.com/repo".to_string()),
+            revision_sha: Some("alpha-sha".to_string()),
             source_file: Some("README.md".to_string()),
             start_line: Some(1),
             end_line: Some(5),

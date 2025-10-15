@@ -23,6 +23,9 @@ fn generated_structs_convert_to_record_batch() {
 #[test]
 fn generated_vector_struct_handles_embedding() {
     let chunk = ReadmeChunk {
+        id: Some("chunk-1".to_string()),
+        project_url: Some("https://github.com/example/repo".to_string()),
+        revision_sha: Some("abc123".to_string()),
         source_file: Some("README.md".to_string()),
         start_line: Some(1),
         end_line: Some(20),
