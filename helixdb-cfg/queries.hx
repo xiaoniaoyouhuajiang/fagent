@@ -44,7 +44,7 @@ QUERY create_files_for_version(version_id: ID, files: [{path: String, language: 
     version_node <- N<VERSION>(version_id)
     FOR { path, language } IN files {
         file_node <- AddN<FILE>({path: path, language: language})
-        AddE<CONTAINS_CODE>()::From(version_node)::To(file_node)
+        AddE<CONTAINS>()::From(version_node)::To(file_node)
     }
     RETURN "success"
 
@@ -59,7 +59,7 @@ QUERY create_functions_for_file(file_id: ID, functions: [{name: String, signatur
             end_line: end_line, 
             is_component: is_component
         })
-        AddE<DEFINES_FUNCTION>()::From(file_node)::To(func_node)
+        AddE<CONTAINS>()::From(file_node)::To(func_node)
     }
     RETURN "success"
 
@@ -72,7 +72,7 @@ QUERY create_classes_for_file(file_id: ID, classes: [{name: String, start_line: 
             start_line: start_line, 
             end_line: end_line
         })
-        AddE<DEFINES_CLASS>()::From(file_node)::To(class_node)
+        AddE<CONTAINS>()::From(file_node)::To(class_node)
     }
     RETURN "success"
 
@@ -86,7 +86,7 @@ QUERY create_datamodels_for_file(file_id: ID, datamodels: [{name: String, constr
             start_line: start_line, 
             end_line: end_line
         })
-        AddE<DEFINES_DATA_MODEL>()::From(file_node)::To(dm_node)
+        AddE<CONTAINS>()::From(file_node)::To(dm_node)
     }
     RETURN "success"
 
@@ -100,7 +100,7 @@ QUERY create_tests_for_file(file_id: ID, tests: [{name: String, test_kind: Strin
             start_line: start_line, 
             end_line: end_line
         })
-        AddE<DEFINES_TEST>()::From(file_node)::To(test_node)
+        AddE<CONTAINS>()::From(file_node)::To(test_node)
     }
     RETURN "success"
 
@@ -109,7 +109,7 @@ QUERY create_endpoints_for_file(file_id: ID, endpoints: [{path: String, http_met
     file_node <- N<FILE>(file_id)
     FOR { path, http_method } IN endpoints {
         ep_node <- AddN<ENDPOINT>({ path: path, http_method: http_method })
-        AddE<DEFINES_ENDPOINT>()::From(file_node)::To(ep_node)
+        AddE<CONTAINS>()::From(file_node)::To(ep_node)
     }
     RETURN "success"
 
@@ -118,7 +118,7 @@ QUERY embed_function_chunks(chunks: [{source_node_id: ID, source_node_key: Strin
     FOR { source_node_id, source_node_key, language, vector } IN chunks {
         source_node <- N<FUNCTION>(source_node_id)
         code_chunk <- AddV<CODE_CHUNK>(vector, {source_node_key: source_node_key, language: language})
-        AddE<HAS_EMBEDDING_FROM_FUNCTION>()::From(source_node)::To(code_chunk)
+        AddE<EMBEDS>()::From(source_node)::To(code_chunk)
     }
     RETURN "success"
 
@@ -127,7 +127,7 @@ QUERY embed_class_chunks(chunks: [{source_node_id: ID, source_node_key: String, 
     FOR { source_node_id, source_node_key, language, vector } IN chunks {
         source_node <- N<CLASS>(source_node_id)
         code_chunk <- AddV<CODE_CHUNK>(vector, {source_node_key: source_node_key, language: language})
-        AddE<HAS_EMBEDDING_FROM_CLASS>()::From(source_node)::To(code_chunk)
+        AddE<EMBEDS>()::From(source_node)::To(code_chunk)
     }
     RETURN "success"
 
@@ -169,12 +169,12 @@ QUERY create_tests_endpoint_edges(edges: [{test_id: ID, target_id: ID}]) =>
     }
     RETURN "success"
 
-// Batch creates HANDLED_BY edges between endpoints and functions
+// Batch creates HANDLER edges between endpoints and functions
 QUERY create_handled_by_edges(handlers: [{endpoint_id: ID, function_id: ID}]) =>
     FOR { endpoint_id, function_id } IN handlers {
         from_node <- N<ENDPOINT>(endpoint_id)
         to_node <- N<FUNCTION>(function_id)
-        AddE<HANDLED_BY>()::From(from_node)::To(to_node)
+        AddE<HANDLER>()::From(from_node)::To(to_node)
     }
     RETURN "success"
 
@@ -190,10 +190,10 @@ QUERY find_function_details(version_sha: String, file_path: String, function_nam
     // Filter them to find the one in the correct version and file
     func <- candidate_funcs::WHERE(
         EXISTS(
-            _::InE<DEFINES_FUNCTION>
+            _::InE<CONTAINS>
              ::FromN
              ::WHERE(_::{path}::EQ(file_path))
-             ::InE<CONTAINS_CODE>
+             ::InE<CONTAINS>
              ::FromN
              ::WHERE(_::{sha}::EQ(version_sha))
         )
@@ -203,17 +203,17 @@ QUERY find_function_details(version_sha: String, file_path: String, function_nam
 // Finds all functions that a given function calls.
 QUERY get_function_callees(function_id: ID) =>
     callees <- N<FUNCTION>(function_id)::Out<CALLS>
-    RETURN callees::{ id, name, path: _::InE<DEFINES_FUNCTION>::FromN::{path} }
+    RETURN callees::{ id, name, path: _::InE<CONTAINS>::FromN::{path} }
 
 // Finds all functions that call a given function.
 QUERY get_function_callers(function_id: ID) =>
     callers <- N<FUNCTION>(function_id)::In<CALLS>
-    RETURN callers::{ id, name, path: _::InE<DEFINES_FUNCTION>::FromN::{path} }
+    RETURN callers::{ id, name, path: _::InE<CONTAINS>::FromN::{path} }
 
 // Finds all tests that cover a specific function.
 QUERY get_tests_for_function(function_id: ID) =>
     tests <- N<FUNCTION>(function_id)::In<TESTS_FUNCTION>
-    RETURN tests::{ id, name, test_kind, path: _::InE<DEFINES_TEST>::FromN::{path} }
+    RETURN tests::{ id, name, test_kind, path: _::InE<CONTAINS>::FromN::{path} }
 
 // Finds the handler function for a given API endpoint.
 // The additional filter (`http_method`) is now applied in a subsequent WHERE clause,
@@ -221,12 +221,12 @@ QUERY get_tests_for_function(function_id: ID) =>
 QUERY get_endpoint_handler(api_path: String, http_method: String) =>
     handler <- N<ENDPOINT>({ path: api_path })
         ::WHERE(_::{http_method}::EQ(http_method))
-        ::Out<HANDLED_BY>
-    RETURN handler::{ id, name, signature, path: _::InE<DEFINES_FUNCTION>::FromN::{path} }
+        ::Out<HANDLER>
+    RETURN handler::{ id, name, signature, path: _::InE<CONTAINS>::FromN::{path} }
 
 // Gets all files in a specific version.
 QUERY get_files_in_version(version_sha: String) =>
-    files <- N<VERSION>({ sha: version_sha })::Out<CONTAINS_CODE>
+    files <- N<VERSION>({ sha: version_sha })::Out<CONTAINS>
     RETURN files::{ id, path, language }
 
 
@@ -238,12 +238,12 @@ QUERY find_similar_function_chunks(query_text: String, k: I64) =>
     // Step 1: Perform the vector search
     vectors <- SearchV<CODE_CHUNK>(Embed(query_text), k)
     // Step 2: Traverse from the found vectors to their source FUNCTION nodes
-    functions <- vectors::In<HAS_EMBEDDING_FROM_FUNCTION>
+    functions <- vectors::In<EMBEDS>
     // Step 3: Remap the final results, including the score from the initial vector search
     RETURN functions::{
         id,
         name,
-        path: _::InE<DEFINES_FUNCTION>::FromN::{path},
+        path: _::InE<CONTAINS>::FromN::{path},
         // Note: Accessing the score requires a more complex query structure or client-side join.
         // This simplified version returns the core data. A future version of HQL might improve this.
     }
@@ -253,12 +253,12 @@ QUERY find_similar_class_chunks(query_text: String, k: I64) =>
     // Step 1: Perform the vector search
     vectors <- SearchV<CODE_CHUNK>(Embed(query_text), k)
     // Step 2: Traverse from the found vectors to their source CLASS nodes
-    classes <- vectors::In<HAS_EMBEDDING_FROM_CLASS>
+    classes <- vectors::In<EMBEDS>
     // Step 3: Remap the final results
     RETURN classes::{
         id,
         name,
-        path: _::InE<DEFINES_CLASS>::FromN::{path},
+        path: _::InE<CONTAINS>::FromN::{path},
     }
 
 // Finds relevant documentation chunks for a natural language query.
@@ -276,7 +276,7 @@ QUERY find_relevant_docs(query_text: String, k: I64) =>
 //QUERY find_relevant_callees(function_id: ID, query_text: String, k: I64) =>
 //    callees <- N<FUNCTION>(function_id)::Out<CALLS>
 //    similar_chunks <- SearchV<CODE_CHUNK>(Embed(query_text), k)
-//    similar_functions <- similar_chunks::In<HAS_EMBEDDING>
+//    similar_functions <- similar_chunks::In<EMBEDS>
 //    relevant_callees <- callees::WHERE(
 //        EXISTS(similar_functions::WHERE(_::ID::EQ(callees::ID)))
 //    )

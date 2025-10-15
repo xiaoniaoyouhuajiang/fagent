@@ -77,6 +77,13 @@ schema::3 {
         end_line: I32,
     }
 
+    // Represents a language-level trait or interface
+    N::TRAIT {
+        INDEX name: String,
+        start_line: I32,
+        end_line: I32,
+    }
+
     // Represents a function or method
     N::FUNCTION {
         INDEX name: String,
@@ -155,33 +162,28 @@ schema::3 {
     E::IMPLEMENTS_PR { From: COMMIT, To: PULL_REQUEST }
 
     // --- Code Hierarchy Edges (within a Version) ---
-    E::CONTAINS_CODE { From: VERSION, To: FILE }
-    E::DEFINES_CLASS { From: FILE, To: CLASS }
-    E::DEFINES_FUNCTION { From: FILE, To: FUNCTION }
-    E::DEFINES_DATA_MODEL { From: FILE, To: DATA_MODEL }
-    E::DEFINES_VARIABLE { From: FILE, To: VARIABLE }
-    E::DEFINES_TEST { From: FILE, To: TEST }
-    E::DEFINES_ENDPOINT { From: FILE, To: ENDPOINT }
+    E::CONTAINS { From: VERSION, To: FILE }
+    E::CONTAINS { From: FILE, To: CLASS }
+    E::CONTAINS { From: FILE, To: FUNCTION }
+    E::CONTAINS { From: FILE, To: DATA_MODEL }
+    E::CONTAINS { From: FILE, To: VARIABLE }
+    E::CONTAINS { From: FILE, To: TEST }
+    E::CONTAINS { From: FILE, To: ENDPOINT }
     E::DEPENDS_ON { From: FILE, To: LIBRARY }
 
     // --- Code-Level Relationship Edges (from stackgraph-ast) ---
     E::CALLS { From: FUNCTION, To: FUNCTION }
-    E::USES { From: FUNCTION, To: LIBRARY }
-    E::OPERAND_OF { From: CLASS, To: FUNCTION } // A function is a method of a class
-    E::HANDLED_BY { From: ENDPOINT, To: FUNCTION }
+    E::USES { From: FUNCTION, To: FUNCTION }
+    E::OPERAND { From: CLASS, To: FUNCTION } // A function is a method of a class
+    E::HANDLER { From: ENDPOINT, To: FUNCTION }
     E::PARENT_OF { From: CLASS, To: CLASS } // Inheritance
-    E::IMPLEMENTS { From: CLASS, To: DATA_MODEL } // Class implements an interface
-    E::INSTANTIATES { From: FUNCTION, To: CLASS }
+    E::IMPLEMENTS { From: CLASS, To: TRAIT } // Class implements an interface
+    E::NESTED_IN { From: FUNCTION, To: FUNCTION }
     E::IMPORTS { From: FILE, To: FILE }
-
-    // --- Testing Edges ---
-    E::TESTS_FUNCTION { From: TEST, To: FUNCTION }
-    E::TESTS_CLASS { From: TEST, To: CLASS }
-    E::TESTS_ENDPOINT { From: TEST, To: ENDPOINT }
 
     // --- Documentation and Content Edges ---
     E::CONTAINS_CONTENT { From: PROJECT, To: README_CHUNK }
     E::DOCUMENTS { From: README_CHUNK, To: FUNCTION } // A doc chunk explaining a function
-    E::HAS_EMBEDDING_FROM_FUNCTION { From: FUNCTION, To: CODE_CHUNK }
-    E::HAS_EMBEDDING_FROM_CLASS { From: CLASS, To: CODE_CHUNK }
+    E::EMBEDS { From: FUNCTION, To: CODE_CHUNK }
+    E::EMBEDS { From: CLASS, To: CODE_CHUNK }
 }

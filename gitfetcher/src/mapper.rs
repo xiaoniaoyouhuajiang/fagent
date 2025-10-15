@@ -1,6 +1,9 @@
-use std::sync::Arc;
+use std::{collections::HashMap, convert::TryFrom, sync::Arc};
 
 use crate::readme::{chunk_readme, ReadmeChunkPiece};
+use ast::lang::asg::NodeData;
+use ast::lang::graphs::{BTreeMapGraph, EdgeType, Node as AstNode, NodeType};
+use chrono::{DateTime, Utc};
 use deltalake::arrow::{
     array::{Int64Array, StringArray, TimestampMicrosecondArray},
     datatypes::{DataType, Field, Schema, TimeUnit},
@@ -11,13 +14,18 @@ use fstorage::{
     errors::{Result as StorageResult, StorageError},
     fetch::Fetchable,
     fetch::GraphData,
-    schemas::generated_schemas::{Commit, HasVersion, IsCommit, Project, ReadmeChunk, Version},
+    schemas::generated_schemas::{
+        Calls, Class, Commit, Contains, DataModel, Endpoint, File, Function, Handler, HasVersion,
+        Implements, Imports, IsCommit, Library, NestedIn, Operand, ParentOf, Project, ReadmeChunk,
+        Test, Trait, Uses, Variable, Version,
+    },
     utils::id::{stable_edge_id_u128, stable_node_id_u128},
 };
 use uuid::Uuid;
 
 use crate::{
-    models::{RepoSnapshot, SearchRepository},
+    code_workspace::{prepare_workspace, WorkspaceConfig},
+    models::{RepoSnapshot, RepositoryInfo, SearchRepository},
     params::RepoSnapshotParams,
 };
 
@@ -151,7 +159,665 @@ pub async fn build_repo_snapshot_graph(
         }
     }
 
+    if params.include_code {
+        append_code_graph(&mut graph, snapshot).await?;
+    }
+
     Ok(graph)
+}
+
+async fn append_code_graph(graph: &mut GraphData, snapshot: &RepoSnapshot) -> StorageResult<()> {
+    let repo = &snapshot.repository;
+    let clone_source = repo_clone_source(repo);
+    let workspace = prepare_workspace(WorkspaceConfig {
+        repo_url: &clone_source,
+        display_name: &repo.full_name,
+        revision: &snapshot.revision.sha,
+    })
+    .await?;
+
+    let code_graph = workspace.build_graph().await?;
+    translate_ast_graph(graph, &code_graph, snapshot.commit.authored_at)?;
+    Ok(())
+}
+
+fn repo_clone_source(repo: &RepositoryInfo) -> String {
+    let url = repo.html_url.trim();
+    if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("git@") {
+        if url.ends_with(".git") {
+            url.to_string()
+        } else {
+            format!("{url}.git")
+        }
+    } else {
+        url.to_string()
+    }
+}
+
+struct NodeDescriptor {
+    entity_type: &'static str,
+    node_id: String,
+}
+
+impl NodeDescriptor {
+    fn new(entity_type: &'static str, node_id: String) -> Self {
+        Self {
+            entity_type,
+            node_id,
+        }
+    }
+}
+
+#[derive(Default)]
+struct NodeBuckets {
+    files: Vec<File>,
+    classes: Vec<Class>,
+    traits: Vec<Trait>,
+    functions: Vec<Function>,
+    data_models: Vec<DataModel>,
+    variables: Vec<Variable>,
+    tests: Vec<Test>,
+    endpoints: Vec<Endpoint>,
+    libraries: Vec<Library>,
+}
+
+impl NodeBuckets {
+    fn flush(self, graph: &mut GraphData) {
+        if !self.files.is_empty() {
+            graph.add_entities(self.files);
+        }
+        if !self.classes.is_empty() {
+            graph.add_entities(self.classes);
+        }
+        if !self.traits.is_empty() {
+            graph.add_entities(self.traits);
+        }
+        if !self.functions.is_empty() {
+            graph.add_entities(self.functions);
+        }
+        if !self.data_models.is_empty() {
+            graph.add_entities(self.data_models);
+        }
+        if !self.variables.is_empty() {
+            graph.add_entities(self.variables);
+        }
+        if !self.tests.is_empty() {
+            graph.add_entities(self.tests);
+        }
+        if !self.endpoints.is_empty() {
+            graph.add_entities(self.endpoints);
+        }
+        if !self.libraries.is_empty() {
+            graph.add_entities(self.libraries);
+        }
+    }
+}
+
+#[derive(Default)]
+struct EdgeBuckets {
+    contains: Vec<Contains>,
+    calls: Vec<Calls>,
+    uses: Vec<Uses>,
+    operand: Vec<Operand>,
+    handler: Vec<Handler>,
+    parent_of: Vec<ParentOf>,
+    implements: Vec<Implements>,
+    nested_in: Vec<NestedIn>,
+    imports: Vec<Imports>,
+}
+
+impl EdgeBuckets {
+    fn flush(self, graph: &mut GraphData) {
+        if !self.contains.is_empty() {
+            graph.add_entities(self.contains);
+        }
+        if !self.calls.is_empty() {
+            graph.add_entities(self.calls);
+        }
+        if !self.uses.is_empty() {
+            graph.add_entities(self.uses);
+        }
+        if !self.operand.is_empty() {
+            graph.add_entities(self.operand);
+        }
+        if !self.handler.is_empty() {
+            graph.add_entities(self.handler);
+        }
+        if !self.parent_of.is_empty() {
+            graph.add_entities(self.parent_of);
+        }
+        if !self.implements.is_empty() {
+            graph.add_entities(self.implements);
+        }
+        if !self.nested_in.is_empty() {
+            graph.add_entities(self.nested_in);
+        }
+        if !self.imports.is_empty() {
+            graph.add_entities(self.imports);
+        }
+    }
+}
+
+enum MappedNode {
+    File(File, NodeDescriptor),
+    Class(Class, NodeDescriptor),
+    Trait(Trait, NodeDescriptor),
+    Function(Function, NodeDescriptor),
+    DataModel(DataModel, NodeDescriptor),
+    Variable(Variable, NodeDescriptor),
+    Test(Test, NodeDescriptor),
+    Endpoint(Endpoint, NodeDescriptor),
+    Library(Library, NodeDescriptor),
+}
+
+fn translate_ast_graph(
+    graph: &mut GraphData,
+    code_graph: &BTreeMapGraph,
+    commit_ts: DateTime<Utc>,
+) -> StorageResult<()> {
+    let mut descriptors: HashMap<String, NodeDescriptor> = HashMap::new();
+    let mut nodes = NodeBuckets::default();
+
+    for (key, node) in &code_graph.nodes {
+        if let Some(mapped) = map_ast_node(node) {
+            match mapped {
+                MappedNode::File(value, descriptor) => {
+                    descriptors.insert(key.clone(), descriptor);
+                    nodes.files.push(value);
+                }
+                MappedNode::Class(value, descriptor) => {
+                    descriptors.insert(key.clone(), descriptor);
+                    nodes.classes.push(value);
+                }
+                MappedNode::Trait(value, descriptor) => {
+                    descriptors.insert(key.clone(), descriptor);
+                    nodes.traits.push(value);
+                }
+                MappedNode::Function(value, descriptor) => {
+                    descriptors.insert(key.clone(), descriptor);
+                    nodes.functions.push(value);
+                }
+                MappedNode::DataModel(value, descriptor) => {
+                    descriptors.insert(key.clone(), descriptor);
+                    nodes.data_models.push(value);
+                }
+                MappedNode::Variable(value, descriptor) => {
+                    descriptors.insert(key.clone(), descriptor);
+                    nodes.variables.push(value);
+                }
+                MappedNode::Test(value, descriptor) => {
+                    descriptors.insert(key.clone(), descriptor);
+                    nodes.tests.push(value);
+                }
+                MappedNode::Endpoint(value, descriptor) => {
+                    descriptors.insert(key.clone(), descriptor);
+                    nodes.endpoints.push(value);
+                }
+                MappedNode::Library(value, descriptor) => {
+                    descriptors.insert(key.clone(), descriptor);
+                    nodes.libraries.push(value);
+                }
+            }
+        }
+    }
+
+    nodes.flush(graph);
+
+    let mut edges = EdgeBuckets::default();
+    for (source_key, target_key, edge_type) in &code_graph.edges {
+        let Some(source_desc) = descriptors.get(source_key) else {
+            continue;
+        };
+        let Some(target_desc) = descriptors.get(target_key) else {
+            continue;
+        };
+        match edge_type {
+            EdgeType::Contains => {
+                edges
+                    .contains
+                    .push(make_contains(source_desc, target_desc, commit_ts));
+            }
+            EdgeType::Calls => {
+                edges
+                    .calls
+                    .push(make_calls(source_desc, target_desc, commit_ts));
+            }
+            EdgeType::Uses => {
+                edges
+                    .uses
+                    .push(make_uses(source_desc, target_desc, commit_ts));
+            }
+            EdgeType::Operand => {
+                edges
+                    .operand
+                    .push(make_operand(source_desc, target_desc, commit_ts));
+            }
+            EdgeType::Handler => {
+                edges
+                    .handler
+                    .push(make_handler(source_desc, target_desc, commit_ts));
+            }
+            EdgeType::ParentOf => {
+                edges
+                    .parent_of
+                    .push(make_parent_of(source_desc, target_desc, commit_ts));
+            }
+            EdgeType::Implements => {
+                edges
+                    .implements
+                    .push(make_implements(source_desc, target_desc, commit_ts));
+            }
+            EdgeType::NestedIn => {
+                edges
+                    .nested_in
+                    .push(make_nested_in(source_desc, target_desc, commit_ts));
+            }
+            EdgeType::Imports => {
+                edges
+                    .imports
+                    .push(make_imports(source_desc, target_desc, commit_ts));
+            }
+            _ => {}
+        }
+    }
+
+    edges.flush(graph);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ast::lang::graphs::Edge;
+    use ast::lang::Graph;
+    use chrono::Utc;
+
+    #[test]
+    fn translate_ast_graph_maps_nodes_and_edges() {
+        let mut graph = GraphData::new();
+        let mut code_graph = BTreeMapGraph::default();
+
+        let mut file_node = NodeData::default();
+        file_node.name = "src/lib.rs".into();
+        file_node.file = "src/lib.rs".into();
+
+        let mut function_node = NodeData::default();
+        function_node.name = "greet".into();
+        function_node.file = "src/lib.rs".into();
+        function_node.start = 0;
+        function_node.end = 1;
+
+        code_graph.add_node(NodeType::File, file_node.clone());
+        code_graph.add_node(NodeType::Function, function_node.clone());
+        let contains_edge = Edge::contains(
+            NodeType::File,
+            &file_node,
+            NodeType::Function,
+            &function_node,
+        );
+        code_graph.add_edge(contains_edge);
+
+        translate_ast_graph(&mut graph, &code_graph, Utc::now()).expect("translate");
+
+        let mut entity_types: Vec<_> = graph
+            .entities
+            .iter()
+            .map(|entity| entity.entity_type_any())
+            .collect();
+        entity_types.sort();
+
+        assert!(entity_types.contains(&File::ENTITY_TYPE));
+        assert!(entity_types.contains(&Function::ENTITY_TYPE));
+        assert!(entity_types.contains(&Contains::ENTITY_TYPE));
+    }
+}
+
+fn map_ast_node(node: &AstNode) -> Option<MappedNode> {
+    match node.node_type {
+        NodeType::File => {
+            let path = optional_string(&node.node_data.file)
+                .or_else(|| optional_string(&node.node_data.name))?;
+            let language = meta_value(&node.node_data, "language");
+            let descriptor = NodeDescriptor::new(
+                File::ENTITY_TYPE,
+                uuid_from_node(File::ENTITY_TYPE, &[("path", path.clone())]),
+            );
+            Some(MappedNode::File(
+                File {
+                    path: Some(path),
+                    language,
+                },
+                descriptor,
+            ))
+        }
+        NodeType::Class => {
+            let name = optional_string(&node.node_data.name)?;
+            let (start_line, end_line) = line_bounds(&node.node_data);
+            let descriptor = NodeDescriptor::new(
+                Class::ENTITY_TYPE,
+                uuid_from_node(Class::ENTITY_TYPE, &[("name", name.clone())]),
+            );
+            Some(MappedNode::Class(
+                Class {
+                    name: Some(name),
+                    start_line,
+                    end_line,
+                },
+                descriptor,
+            ))
+        }
+        NodeType::Trait => {
+            let name = optional_string(&node.node_data.name)?;
+            let (start_line, end_line) = line_bounds(&node.node_data);
+            let descriptor = NodeDescriptor::new(
+                Trait::ENTITY_TYPE,
+                uuid_from_node(Trait::ENTITY_TYPE, &[("name", name.clone())]),
+            );
+            Some(MappedNode::Trait(
+                Trait {
+                    name: Some(name),
+                    start_line,
+                    end_line,
+                },
+                descriptor,
+            ))
+        }
+        NodeType::Function => {
+            let name = optional_string(&node.node_data.name)?;
+            let (start_line, end_line) = line_bounds(&node.node_data);
+            let signature = meta_value(&node.node_data, "signature")
+                .or_else(|| meta_value(&node.node_data, "interface"));
+            let is_component = bool_from_meta(&node.node_data, "component");
+            let descriptor = NodeDescriptor::new(
+                Function::ENTITY_TYPE,
+                uuid_from_node(Function::ENTITY_TYPE, &[("name", name.clone())]),
+            );
+            Some(MappedNode::Function(
+                Function {
+                    name: Some(name),
+                    signature,
+                    start_line,
+                    end_line,
+                    is_component,
+                },
+                descriptor,
+            ))
+        }
+        NodeType::DataModel => {
+            let name = optional_string(&node.node_data.name)?;
+            let (start_line, end_line) = line_bounds(&node.node_data);
+            let construct = meta_value(&node.node_data, "construct")
+                .or_else(|| meta_value(&node.node_data, "type"));
+            let descriptor = NodeDescriptor::new(
+                DataModel::ENTITY_TYPE,
+                uuid_from_node(DataModel::ENTITY_TYPE, &[("name", name.clone())]),
+            );
+            Some(MappedNode::DataModel(
+                DataModel {
+                    name: Some(name),
+                    construct,
+                    start_line,
+                    end_line,
+                },
+                descriptor,
+            ))
+        }
+        NodeType::Var => {
+            let name = optional_string(&node.node_data.name)?;
+            let descriptor = NodeDescriptor::new(
+                Variable::ENTITY_TYPE,
+                uuid_from_node(Variable::ENTITY_TYPE, &[("name", name.clone())]),
+            );
+            Some(MappedNode::Variable(
+                Variable {
+                    name: Some(name),
+                    data_type: node.node_data.data_type.clone(),
+                },
+                descriptor,
+            ))
+        }
+        NodeType::UnitTest | NodeType::IntegrationTest | NodeType::E2eTest => {
+            let name = optional_string(&node.node_data.name)?;
+            let (start_line, end_line) = line_bounds(&node.node_data);
+            let test_kind = match node.node_type {
+                NodeType::UnitTest => "unit",
+                NodeType::IntegrationTest => "integration",
+                NodeType::E2eTest => "e2e",
+                _ => unreachable!(),
+            }
+            .to_string();
+            let descriptor = NodeDescriptor::new(
+                Test::ENTITY_TYPE,
+                uuid_from_node(Test::ENTITY_TYPE, &[("name", name.clone())]),
+            );
+            Some(MappedNode::Test(
+                Test {
+                    name: Some(name),
+                    test_kind: Some(test_kind),
+                    start_line,
+                    end_line,
+                },
+                descriptor,
+            ))
+        }
+        NodeType::Endpoint => {
+            let path = meta_value(&node.node_data, "path")
+                .or_else(|| optional_string(&node.node_data.name))?;
+            let http_method = meta_value(&node.node_data, "verb");
+            let descriptor = NodeDescriptor::new(
+                Endpoint::ENTITY_TYPE,
+                uuid_from_node(Endpoint::ENTITY_TYPE, &[("path", path.clone())]),
+            );
+            Some(MappedNode::Endpoint(
+                Endpoint {
+                    path: Some(path),
+                    http_method,
+                },
+                descriptor,
+            ))
+        }
+        NodeType::Library => {
+            let name = optional_string(&node.node_data.name)?;
+            let version = meta_value(&node.node_data, "version");
+            let descriptor = NodeDescriptor::new(
+                Library::ENTITY_TYPE,
+                uuid_from_node(Library::ENTITY_TYPE, &[("name", name.clone())]),
+            );
+            Some(MappedNode::Library(
+                Library {
+                    name: Some(name),
+                    version,
+                },
+                descriptor,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn line_bounds(data: &NodeData) -> (Option<i32>, Option<i32>) {
+    (line_number(data.start), line_number(data.end))
+}
+
+fn line_number(value: usize) -> Option<i32> {
+    value.checked_add(1).and_then(|v| i32::try_from(v).ok())
+}
+
+fn meta_value(data: &NodeData, key: &str) -> Option<String> {
+    data.meta.get(key).cloned()
+}
+
+fn bool_from_meta(data: &NodeData, key: &str) -> Option<bool> {
+    meta_value(data, key).map(|value| {
+        let normalized = value.to_lowercase();
+        matches!(normalized.as_str(), "1" | "true" | "yes" | "y")
+    })
+}
+
+fn optional_string(value: &str) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+struct EdgeBase {
+    id: String,
+    from_node_id: String,
+    to_node_id: String,
+    from_node_type: String,
+    to_node_type: String,
+    created_at: Option<DateTime<Utc>>,
+}
+
+fn edge_base(
+    edge_entity_type: &str,
+    from: &NodeDescriptor,
+    to: &NodeDescriptor,
+    created_at: DateTime<Utc>,
+) -> EdgeBase {
+    EdgeBase {
+        id: uuid_from_edge(edge_entity_type, &from.node_id, &to.node_id),
+        from_node_id: from.node_id.clone(),
+        to_node_id: to.node_id.clone(),
+        from_node_type: from.entity_type.to_string(),
+        to_node_type: to.entity_type.to_string(),
+        created_at: Some(created_at),
+    }
+}
+
+fn make_contains(
+    from: &NodeDescriptor,
+    to: &NodeDescriptor,
+    created_at: DateTime<Utc>,
+) -> Contains {
+    let base = edge_base(Contains::ENTITY_TYPE, from, to, created_at);
+    Contains {
+        id: Some(base.id),
+        from_node_id: Some(base.from_node_id),
+        to_node_id: Some(base.to_node_id),
+        from_node_type: Some(base.from_node_type),
+        to_node_type: Some(base.to_node_type),
+        created_at: base.created_at,
+        updated_at: None,
+    }
+}
+
+fn make_calls(from: &NodeDescriptor, to: &NodeDescriptor, created_at: DateTime<Utc>) -> Calls {
+    let base = edge_base(Calls::ENTITY_TYPE, from, to, created_at);
+    Calls {
+        id: Some(base.id),
+        from_node_id: Some(base.from_node_id),
+        to_node_id: Some(base.to_node_id),
+        from_node_type: Some(base.from_node_type),
+        to_node_type: Some(base.to_node_type),
+        created_at: base.created_at,
+        updated_at: None,
+    }
+}
+
+fn make_uses(from: &NodeDescriptor, to: &NodeDescriptor, created_at: DateTime<Utc>) -> Uses {
+    let base = edge_base(Uses::ENTITY_TYPE, from, to, created_at);
+    Uses {
+        id: Some(base.id),
+        from_node_id: Some(base.from_node_id),
+        to_node_id: Some(base.to_node_id),
+        from_node_type: Some(base.from_node_type),
+        to_node_type: Some(base.to_node_type),
+        created_at: base.created_at,
+        updated_at: None,
+    }
+}
+
+fn make_operand(from: &NodeDescriptor, to: &NodeDescriptor, created_at: DateTime<Utc>) -> Operand {
+    let base = edge_base(Operand::ENTITY_TYPE, from, to, created_at);
+    Operand {
+        id: Some(base.id),
+        from_node_id: Some(base.from_node_id),
+        to_node_id: Some(base.to_node_id),
+        from_node_type: Some(base.from_node_type),
+        to_node_type: Some(base.to_node_type),
+        created_at: base.created_at,
+        updated_at: None,
+    }
+}
+
+fn make_handler(from: &NodeDescriptor, to: &NodeDescriptor, created_at: DateTime<Utc>) -> Handler {
+    let base = edge_base(Handler::ENTITY_TYPE, from, to, created_at);
+    Handler {
+        id: Some(base.id),
+        from_node_id: Some(base.from_node_id),
+        to_node_id: Some(base.to_node_id),
+        from_node_type: Some(base.from_node_type),
+        to_node_type: Some(base.to_node_type),
+        created_at: base.created_at,
+        updated_at: None,
+    }
+}
+
+fn make_parent_of(
+    from: &NodeDescriptor,
+    to: &NodeDescriptor,
+    created_at: DateTime<Utc>,
+) -> ParentOf {
+    let base = edge_base(ParentOf::ENTITY_TYPE, from, to, created_at);
+    ParentOf {
+        id: Some(base.id),
+        from_node_id: Some(base.from_node_id),
+        to_node_id: Some(base.to_node_id),
+        from_node_type: Some(base.from_node_type),
+        to_node_type: Some(base.to_node_type),
+        created_at: base.created_at,
+        updated_at: None,
+    }
+}
+
+fn make_implements(
+    from: &NodeDescriptor,
+    to: &NodeDescriptor,
+    created_at: DateTime<Utc>,
+) -> Implements {
+    let base = edge_base(Implements::ENTITY_TYPE, from, to, created_at);
+    Implements {
+        id: Some(base.id),
+        from_node_id: Some(base.from_node_id),
+        to_node_id: Some(base.to_node_id),
+        from_node_type: Some(base.from_node_type),
+        to_node_type: Some(base.to_node_type),
+        created_at: base.created_at,
+        updated_at: None,
+    }
+}
+
+fn make_nested_in(
+    from: &NodeDescriptor,
+    to: &NodeDescriptor,
+    created_at: DateTime<Utc>,
+) -> NestedIn {
+    let base = edge_base(NestedIn::ENTITY_TYPE, from, to, created_at);
+    NestedIn {
+        id: Some(base.id),
+        from_node_id: Some(base.from_node_id),
+        to_node_id: Some(base.to_node_id),
+        from_node_type: Some(base.from_node_type),
+        to_node_type: Some(base.to_node_type),
+        created_at: base.created_at,
+        updated_at: None,
+    }
+}
+
+fn make_imports(from: &NodeDescriptor, to: &NodeDescriptor, created_at: DateTime<Utc>) -> Imports {
+    let base = edge_base(Imports::ENTITY_TYPE, from, to, created_at);
+    Imports {
+        id: Some(base.id),
+        from_node_id: Some(base.from_node_id),
+        to_node_id: Some(base.to_node_id),
+        from_node_type: Some(base.from_node_type),
+        to_node_type: Some(base.to_node_type),
+        created_at: base.created_at,
+        updated_at: None,
+    }
 }
 
 fn uuid_from_node(entity_type: &str, keys: &[(&str, String)]) -> String {

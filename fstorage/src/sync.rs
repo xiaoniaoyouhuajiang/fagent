@@ -2,8 +2,7 @@ use crate::auto_fetchable;
 use crate::catalog::Catalog;
 use crate::errors::{Result, StorageError};
 use crate::fetch::{
-    EntityCategory, FetchResponse, Fetcher, FetcherCapability, GraphData, ProbeReport,
-    Fetchable,
+    EntityCategory, FetchResponse, Fetchable, Fetcher, FetcherCapability, GraphData, ProbeReport,
 };
 use crate::lake::Lake;
 use crate::models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext};
@@ -12,7 +11,9 @@ use crate::utils;
 use async_trait::async_trait;
 use bincode;
 use chrono::{DateTime, Utc};
-use deltalake::arrow::array::{Array, Float32Array, ListArray, StringArray, TimestampMicrosecondArray};
+use deltalake::arrow::array::{
+    Array, Float32Array, ListArray, StringArray, TimestampMicrosecondArray,
+};
 use deltalake::arrow::datatypes::{DataType, Field, Schema};
 use deltalake::arrow::record_batch::RecordBatch;
 use heed3::RoTxn;
@@ -786,7 +787,11 @@ impl FStorageSynchronizer {
                     .to_lowercase()
             );
             self.lake
-                .write_batches(&edge_table, vec![edge_batch.clone()], Some(vec!["id".to_string()]))
+                .write_batches(
+                    &edge_table,
+                    vec![edge_batch.clone()],
+                    Some(vec!["id".to_string()]),
+                )
                 .await?;
             self.catalog.ensure_ingestion_offset(
                 &edge_table,

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use fstorage::schemas::generated_schemas as schemas;
 use fstorage::{
     embedding::EmbeddingProvider,
     errors::{Result as StorageResult, StorageError},
@@ -23,6 +24,30 @@ fn edge_table_path(entity_type: &str) -> String {
     format!("silver/edges/{suffix}")
 }
 
+fn node_dataset<T: Fetchable>() -> ProducedDataset {
+    ProducedDataset {
+        kind: "node",
+        name: T::ENTITY_TYPE.to_string(),
+        table_path: T::table_name(),
+        primary_keys: T::primary_keys()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect(),
+    }
+}
+
+fn edge_dataset<T: Fetchable>() -> ProducedDataset {
+    ProducedDataset {
+        kind: "edge",
+        name: T::ENTITY_TYPE.to_string(),
+        table_path: edge_table_path(T::ENTITY_TYPE),
+        primary_keys: T::primary_keys()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect(),
+    }
+}
+
 pub struct GitFetcher {
     client: Arc<dyn GitHubService>,
 }
@@ -42,56 +67,12 @@ impl GitFetcher {
     }
 
     fn capability_descriptor() -> FetcherCapability {
-        let produces = vec![
-            ProducedDataset {
-                kind: "node",
-                name: fstorage::schemas::generated_schemas::Project::ENTITY_TYPE.to_string(),
-                table_path: fstorage::schemas::generated_schemas::Project::table_name(),
-                primary_keys: fstorage::schemas::generated_schemas::Project::primary_keys()
-                    .into_iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            },
-            ProducedDataset {
-                kind: "node",
-                name: fstorage::schemas::generated_schemas::Version::ENTITY_TYPE.to_string(),
-                table_path: fstorage::schemas::generated_schemas::Version::table_name(),
-                primary_keys: fstorage::schemas::generated_schemas::Version::primary_keys()
-                    .into_iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            },
-            ProducedDataset {
-                kind: "node",
-                name: fstorage::schemas::generated_schemas::Commit::ENTITY_TYPE.to_string(),
-                table_path: fstorage::schemas::generated_schemas::Commit::table_name(),
-                primary_keys: fstorage::schemas::generated_schemas::Commit::primary_keys()
-                    .into_iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            },
-            ProducedDataset {
-                kind: "edge",
-                name: fstorage::schemas::generated_schemas::HasVersion::ENTITY_TYPE.to_string(),
-                table_path: edge_table_path(
-                    fstorage::schemas::generated_schemas::HasVersion::ENTITY_TYPE,
-                ),
-                primary_keys: fstorage::schemas::generated_schemas::HasVersion::primary_keys()
-                    .into_iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            },
-            ProducedDataset {
-                kind: "edge",
-                name: fstorage::schemas::generated_schemas::IsCommit::ENTITY_TYPE.to_string(),
-                table_path: edge_table_path(
-                    fstorage::schemas::generated_schemas::IsCommit::ENTITY_TYPE,
-                ),
-                primary_keys: fstorage::schemas::generated_schemas::IsCommit::primary_keys()
-                    .into_iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            },
+        let mut produces = vec![
+            node_dataset::<schemas::Project>(),
+            node_dataset::<schemas::Version>(),
+            node_dataset::<schemas::Commit>(),
+            edge_dataset::<schemas::HasVersion>(),
+            edge_dataset::<schemas::IsCommit>(),
             ProducedDataset {
                 kind: "panel",
                 name: "github_search".to_string(),
@@ -99,6 +80,27 @@ impl GitFetcher {
                 primary_keys: vec!["full_name".to_string()],
             },
         ];
+
+        produces.extend(vec![
+            node_dataset::<schemas::File>(),
+            node_dataset::<schemas::Class>(),
+            node_dataset::<schemas::Trait>(),
+            node_dataset::<schemas::Function>(),
+            node_dataset::<schemas::DataModel>(),
+            node_dataset::<schemas::Variable>(),
+            node_dataset::<schemas::Test>(),
+            node_dataset::<schemas::Endpoint>(),
+            node_dataset::<schemas::Library>(),
+            edge_dataset::<schemas::Contains>(),
+            edge_dataset::<schemas::Calls>(),
+            edge_dataset::<schemas::Uses>(),
+            edge_dataset::<schemas::Operand>(),
+            edge_dataset::<schemas::Handler>(),
+            edge_dataset::<schemas::ParentOf>(),
+            edge_dataset::<schemas::Implements>(),
+            edge_dataset::<schemas::NestedIn>(),
+            edge_dataset::<schemas::Imports>(),
+        ]);
 
         FetcherCapability {
             name: "gitfetcher",

@@ -7,16 +7,12 @@ use fstorage::{
 };
 use heed3::RoTxn;
 use helix_db::{
+    helix_engine::traversal_core::ops::out::out::OutAdapter,
+    helix_engine::traversal_core::ops::source::{add_e::EdgeType, n_from_id::NFromIdAdapter},
     helix_engine::traversal_core::ops::vectors::search::SearchVAdapter,
     helix_engine::{
-        traversal_core::ops::g::G,
+        traversal_core::ops::g::G, traversal_core::traversal_value::Traversable,
         vector_core::vector::HVector,
-        traversal_core::traversal_value::Traversable,
-    },
-    helix_engine::traversal_core::ops::out::out::OutAdapter,
-    helix_engine::traversal_core::ops::source::{
-        add_e::EdgeType,
-        n_from_id::NFromIdAdapter,
     },
 };
 
@@ -88,7 +84,10 @@ async fn vector_pipeline_persists_to_lake_and_engine() -> anyhow::Result<()> {
     let contains_content_offset = offsets
         .iter()
         .find(|offset| offset.table_path.ends_with("containscontent"));
-    assert!(contains_content_offset.is_some(), "contains_content offset registered");
+    assert!(
+        contains_content_offset.is_some(),
+        "contains_content offset registered"
+    );
 
     let txn = ctx.engine.storage.graph_env.read_txn()?;
     let query: Vec<f64> = embedding_values.iter().map(|v| *v as f64).collect();

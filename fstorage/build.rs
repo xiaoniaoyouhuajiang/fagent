@@ -3,6 +3,7 @@ use helix_db::helixc::parser::{
     self,
     types::{FieldType, HxFile},
 };
+use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
 use std::io::Write;
@@ -60,7 +61,12 @@ fn main() -> anyhow::Result<()> {
         }
 
         // Generate edge schemas
+        let mut generated_edge_names: HashSet<String> = HashSet::new();
         for edge_schema in &latest_schema.edge_schemas {
+            let edge_struct_name = edge_schema.name.1.to_upper_camel_case();
+            if !generated_edge_names.insert(edge_struct_name.clone()) {
+                continue;
+            }
             generate_edge_struct(&mut file, edge_schema)?;
             writeln!(file, "")?;
         }

@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use ast::repo::{Repo, Repos};
+use ast::{
+    lang::graphs::BTreeMapGraph,
+    repo::{Repo, Repos},
+};
 use fstorage::errors::{Result as StorageResult, StorageError};
 use git2::{
     build::{CheckoutBuilder, RepoBuilder},
@@ -49,6 +52,13 @@ impl CodeWorkspace {
     pub fn display_name(&self) -> &str {
         &self.display_name
     }
+
+    pub async fn build_graph(&self) -> StorageResult<BTreeMapGraph> {
+        self.repos
+            .build_graphs()
+            .await
+            .map_err(|err| StorageError::SyncError(format!("AST graph build failed: {err}")))
+    }
 }
 
 pub async fn prepare_workspace(config: WorkspaceConfig<'_>) -> StorageResult<CodeWorkspace> {
@@ -64,10 +74,14 @@ pub async fn prepare_workspace(config: WorkspaceConfig<'_>) -> StorageResult<Cod
     let checkout_path_clone = checkout_path.clone();
 
     task::spawn_blocking(move || {
-        clone_and_checkout(&repo_url_for_clone, &checkout_path_clone, &revision_for_clone)
+        clone_and_checkout(
+            &repo_url_for_clone,
+            &checkout_path_clone,
+            &revision_for_clone,
+        )
     })
-        .await
-        .map_err(|err| StorageError::SyncError(format!("checkout task failed: {err}")))??;
+    .await
+    .map_err(|err| StorageError::SyncError(format!("checkout task failed: {err}")))??;
 
     let checkout_str = checkout_path
         .to_str()
@@ -150,7 +164,9 @@ fn checkout_revision(repo: &Repository, revision: &str) -> Result<(), StorageErr
                 .fetch(&[revision], Some(&mut fetch_options), None)
                 .map_err(|err| StorageError::SyncError(format!("git fetch failed: {err}")))?;
             repo.revparse_single(&format!("{revision}^{{commit}}"))
-                .map_err(|err| StorageError::SyncError(format!("unknown revision {revision}: {err}")))?
+                .map_err(|err| {
+                    StorageError::SyncError(format!("unknown revision {revision}: {err}"))
+                })?
         }
     };
 
@@ -227,29 +243,25 @@ mod tests {
                 "pub fn hello() -> u32 { 42 }",
             )
             .expect("write lib.rs");
-            std::fs::write(source_path.join("Cargo.toml"), "[package]\nname=\"demo\"\nversion=\"0.1.0\"\nedition=\"2021\"").expect("write cargo");
+            std::fs::write(
+                source_path.join("Cargo.toml"),
+                "[package]\nname=\"demo\"\nversion=\"0.1.0\"\nedition=\"2021\"",
+            )
+            .expect("write cargo");
 
             let mut index = repo.index().expect("index");
-            index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None).expect("add all");
+            index
+                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+                .expect("add all");
             index.write().expect("write index");
             let tree_id = index.write_tree().expect("tree");
             let tree = repo.find_tree(tree_id).expect("find tree");
             let sig = Signature::now("Tester", "tester@example.com").expect("sig");
             let oid = repo
-                .commit(
-                    Some("HEAD"),
-                    &sig,
-                    &sig,
-                    "initial commit",
-                    &tree,
-                    &[],
-                )
+                .commit(Some("HEAD"), &sig, &sig, "initial commit", &tree, &[])
                 .expect("commit");
 
-            let repo_url = source_path
-                .to_str()
-                .expect("unicode path")
-                .to_string();
+            let repo_url = source_path.to_str().expect("unicode path").to_string();
             let revision = oid.to_string();
 
             let workspace = prepare_workspace(WorkspaceConfig {
