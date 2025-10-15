@@ -5,7 +5,7 @@ use chrono::{TimeZone, Utc};
 use fstorage::{
     embedding::NullEmbeddingProvider,
     fetch::{FetchResponse, Fetchable, Fetcher},
-    schemas::generated_schemas::{Commit, HasVersion, IsCommit, Project, Version},
+    schemas::generated_schemas::{Commit, HasVersion, IsCommit, Project, ReadmeChunk, Version},
 };
 use gitfetcher::{
     client::{GitHubService, ProbeMetadata},
@@ -135,16 +135,24 @@ async fn repo_snapshot_fetch_builds_graph() {
                 .map(|entity| entity.entity_type_any())
                 .collect();
             entity_types.sort();
-            assert_eq!(
-                entity_types,
-                vec![
-                    Commit::ENTITY_TYPE,
-                    HasVersion::ENTITY_TYPE,
-                    IsCommit::ENTITY_TYPE,
-                    Project::ENTITY_TYPE,
-                    Version::ENTITY_TYPE,
-                ]
-            );
+            assert_eq!(entity_types.len(), 6);
+            assert!(entity_types.contains(&Commit::ENTITY_TYPE));
+            assert!(entity_types.contains(&HasVersion::ENTITY_TYPE));
+            assert!(entity_types.contains(&IsCommit::ENTITY_TYPE));
+            assert!(entity_types.contains(&Project::ENTITY_TYPE));
+            assert!(entity_types.contains(&Version::ENTITY_TYPE));
+            assert!(entity_types.contains(&ReadmeChunk::ENTITY_TYPE));
+
+            let readme_batches = graph
+                .entities
+                .iter()
+                .filter(|entity| entity.entity_type_any() == ReadmeChunk::ENTITY_TYPE)
+                .collect::<Vec<_>>();
+            assert_eq!(readme_batches.len(), 1);
+            let readme_batch = readme_batches[0]
+                .to_record_batch_any()
+                .expect("readme batch convertible");
+            assert_eq!(readme_batch.num_rows(), 1);
         }
         _ => panic!("unexpected response"),
     }

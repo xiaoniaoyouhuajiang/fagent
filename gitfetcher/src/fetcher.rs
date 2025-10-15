@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use fstorage::{
     embedding::EmbeddingProvider,
     errors::{Result as StorageResult, StorageError},
-    fetch::{FetchResponse, Fetcher, FetcherCapability, Fetchable, ProducedDataset, ProbeReport},
+    fetch::{FetchResponse, Fetchable, Fetcher, FetcherCapability, ProbeReport, ProducedDataset},
 };
 use serde_json::json;
 
@@ -126,7 +126,7 @@ impl GitFetcher {
             default_ttl_secs: Some(6 * 3600),
             examples: vec![
                 json!({"mode": "repo_snapshot", "repo": "rust-lang/rust", "include_code": false}),
-                json!({"mode": "search_repo", "query": "language:rust compiler", "min_stars": 5000})
+                json!({"mode": "search_repo", "query": "language:rust compiler", "min_stars": 5000}),
             ],
         }
     }
@@ -141,9 +141,9 @@ impl GitFetcher {
         params: RepoSnapshotParams,
         embedding_provider: Arc<dyn EmbeddingProvider>,
     ) -> StorageResult<FetchResponse> {
-        let (owner, repo) = params.coordinates().map_err(|err| {
-            StorageError::InvalidArg(format!("invalid repo coordinates: {err}"))
-        })?;
+        let (owner, repo) = params
+            .coordinates()
+            .map_err(|err| StorageError::InvalidArg(format!("invalid repo coordinates: {err}")))?;
 
         let snapshot: RepoSnapshot = self
             .client
@@ -152,15 +152,12 @@ impl GitFetcher {
             .map_err(|err| StorageError::SyncError(err.to_string()))?;
 
         let graph =
-            mapper::build_repo_snapshot_graph(&snapshot, &params, embedding_provider)?;
+            mapper::build_repo_snapshot_graph(&snapshot, &params, embedding_provider).await?;
 
         Ok(FetchResponse::GraphData(graph))
     }
 
-    async fn fetch_search_repo(
-        &self,
-        params: SearchRepoParams,
-    ) -> StorageResult<FetchResponse> {
+    async fn fetch_search_repo(&self, params: SearchRepoParams) -> StorageResult<FetchResponse> {
         let results = self
             .client
             .search_repositories(&params)
@@ -182,9 +179,9 @@ impl GitFetcher {
     }
 
     async fn probe_repo_snapshot(&self, params: RepoSnapshotParams) -> StorageResult<ProbeReport> {
-        let (owner, repo) = params.coordinates().map_err(|err| {
-            StorageError::InvalidArg(format!("invalid repo coordinates: {err}"))
-        })?;
+        let (owner, repo) = params
+            .coordinates()
+            .map_err(|err| StorageError::InvalidArg(format!("invalid repo coordinates: {err}")))?;
 
         let metadata = self
             .client

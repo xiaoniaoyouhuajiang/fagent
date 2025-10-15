@@ -13,18 +13,19 @@ use chrono::Utc;
 use deltalake::arrow::array::{Array, Float32Array, ListArray, StringArray};
 use deltalake::arrow::datatypes::{DataType, Field, Schema};
 use deltalake::arrow::record_batch::RecordBatch;
+use heed3::RoTxn;
 use helix_db::{
     helix_engine::{
-        bm25::bm25::{BM25Flatten, BM25},
+        bm25::bm25::{BM25, BM25Flatten},
         storage_core::storage_methods::StorageMethods,
         traversal_core::{
+            HelixGraphEngine,
             ops::{
                 g::G,
                 source::{e_from_id::EFromIdAdapter, n_from_id::NFromIdAdapter},
                 util::update::UpdateAdapter,
                 vectors::insert::InsertVAdapter,
             },
-            HelixGraphEngine,
         },
         vector_core::vector::HVector,
     },
@@ -34,7 +35,6 @@ use helix_db::{
         label_hash::hash_label,
     },
 };
-use heed3::RoTxn;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
@@ -324,8 +324,7 @@ impl FStorageSynchronizer {
                         continue;
                     }
 
-                    let props_vec: Vec<(String, Value)> =
-                        properties.into_iter().collect();
+                    let props_vec: Vec<(String, Value)> = properties.into_iter().collect();
                     let fields_opt = if props_vec.is_empty() {
                         None
                     } else {
@@ -333,7 +332,11 @@ impl FStorageSynchronizer {
                     };
 
                     let _ = G::new_mut(self.engine.storage.clone(), &mut txn)
-                        .insert_v::<fn(&HVector, &RoTxn) -> bool>(&embedding_vec, entity_type, fields_opt)
+                        .insert_v::<fn(&HVector, &RoTxn) -> bool>(
+                            &embedding_vec,
+                            entity_type,
+                            fields_opt,
+                        )
                         .collect_to::<Vec<_>>();
                 }
             }
@@ -884,9 +887,9 @@ mod tests {
     use crate::embedding::NullEmbeddingProvider;
     use crate::fetch::Fetchable;
     use crate::schemas::generated_schemas::{Project, ReadmeChunk};
+    use chrono::Utc;
     use helix_db::helix_engine::traversal_core::HelixGraphEngineOpts;
     use tempfile::tempdir;
-    use chrono::Utc;
 
     #[tokio::test]
     async fn test_run_full_etl_updates_offsets() {

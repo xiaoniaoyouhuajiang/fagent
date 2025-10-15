@@ -3,6 +3,9 @@ use crate::errors::{Result, StorageError};
 use crate::models::{ColumnSummary, TableSummary};
 use crate::utils;
 use chrono::{DateTime, Utc};
+use deltalake::DeltaTable;
+use deltalake::DeltaTableBuilder;
+use deltalake::ObjectStore;
 use deltalake::arrow::array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
     TimestampMicrosecondArray, UInt32Array, UInt64Array,
@@ -14,11 +17,8 @@ use deltalake::datafusion::execution::context::SessionContext;
 use deltalake::kernel::Action;
 use deltalake::protocol::SaveMode;
 use deltalake::storage::{ObjectStoreRef, Path as ObjectPath};
-use deltalake::DeltaTable;
-use deltalake::DeltaTableBuilder;
-use deltalake::ObjectStore;
-use helix_db::helix_engine::storage_core::storage_methods::StorageMethods;
 use helix_db::helix_engine::storage_core::HelixGraphStorage;
+use helix_db::helix_engine::storage_core::storage_methods::StorageMethods;
 use helix_db::helix_engine::traversal_core::HelixGraphEngine;
 use helix_db::helix_engine::types::GraphError;
 use helix_db::protocol::value::Value as HelixValue;

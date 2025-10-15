@@ -2,7 +2,7 @@ use crate::config::StorageConfig;
 use crate::errors::Result;
 use crate::fetch::EntityCategory;
 use crate::models::{ApiBudget, EntityReadiness, IngestionOffset, SourceAnchor};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde_json;
 use std::sync::{Arc, Mutex};
 
@@ -389,10 +389,7 @@ mod tests {
             .get_ingestion_offset("silver/vectors/readme_chunk")
             .unwrap()
             .unwrap();
-        assert_eq!(
-            vector_offset.category,
-            crate::fetch::EntityCategory::Vector
-        );
+        assert_eq!(vector_offset.category, crate::fetch::EntityCategory::Vector);
         assert_eq!(vector_offset.primary_keys, vec!["embedding_id".to_string()]);
 
         let list = catalog.list_ingestion_offsets().unwrap();

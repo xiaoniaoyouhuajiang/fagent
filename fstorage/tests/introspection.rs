@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use fstorage::{
+    FStorage,
     config::StorageConfig,
     fetch::{
         FetchResponse, Fetchable, Fetcher, FetcherCapability, GraphData, ProbeReport,
@@ -9,7 +10,6 @@ use fstorage::{
     models::{EntityIdentifier, SyncBudget, SyncContext},
     schemas::generated_schemas::Function,
     sync::DataSynchronizer,
-    FStorage,
 };
 use serde_json::json;
 use tempfile::tempdir;

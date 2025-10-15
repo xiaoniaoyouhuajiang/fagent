@@ -5,14 +5,11 @@ use fstorage::{
     schemas::generated_schemas::{Project, ReadmeChunk},
     sync::DataSynchronizer,
 };
+use heed3::RoTxn;
 use helix_db::{
     helix_engine::traversal_core::ops::vectors::search::SearchVAdapter,
-    helix_engine::{
-        traversal_core::ops::g::G,
-        vector_core::vector::HVector,
-    },
+    helix_engine::{traversal_core::ops::g::G, vector_core::vector::HVector},
 };
-use heed3::RoTxn;
 
 mod common;
 
@@ -52,10 +49,7 @@ async fn vector_pipeline_persists_to_lake_and_engine() -> anyhow::Result<()> {
 
     ctx.synchronizer.process_graph_data(graph_data).await?;
 
-    let project_table = ctx
-        .config
-        .lake_path
-        .join(Project::table_name());
+    let project_table = ctx.config.lake_path.join(Project::table_name());
     let project_table_uri = project_table
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("non-UTF8 project table path"))?
@@ -63,10 +57,7 @@ async fn vector_pipeline_persists_to_lake_and_engine() -> anyhow::Result<()> {
     let project_delta = open_table(project_table_uri).await?;
     assert_eq!(project_delta.version(), 0);
 
-    let vector_table = ctx
-        .config
-        .lake_path
-        .join(ReadmeChunk::table_name());
+    let vector_table = ctx.config.lake_path.join(ReadmeChunk::table_name());
     let vector_table_uri = vector_table
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("non-UTF8 vector table path"))?
@@ -85,15 +76,13 @@ async fn vector_pipeline_persists_to_lake_and_engine() -> anyhow::Result<()> {
     let txn = ctx.engine.storage.graph_env.read_txn()?;
     let query: Vec<f64> = embedding_values.iter().map(|v| *v as f64).collect();
     let results = G::new(ctx.engine.storage.clone(), &txn)
-        .search_v::<fn(&HVector, &RoTxn) -> bool, _>(
-            &query,
-            10,
-            ReadmeChunk::ENTITY_TYPE,
-            None,
-        )
+        .search_v::<fn(&HVector, &RoTxn) -> bool, _>(&query, 10, ReadmeChunk::ENTITY_TYPE, None)
         .collect_to::<Vec<_>>();
 
-    assert!(!results.is_empty(), "vector search returns at least one result");
+    assert!(
+        !results.is_empty(),
+        "vector search returns at least one result"
+    );
 
     Ok(())
 }

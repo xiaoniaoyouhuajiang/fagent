@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use octocrab::{
-    models::{repos::{Object, RepoCommit}, Repository},
+    models::{
+        repos::{Object, RepoCommit},
+        Repository,
+    },
     params::repos::Reference,
     Octocrab,
 };
@@ -38,10 +41,8 @@ pub trait GitHubService: Send + Sync {
         rev: Option<&str>,
     ) -> Result<ProbeMetadata>;
 
-    async fn search_repositories(
-        &self,
-        params: &SearchRepoParams,
-    ) -> Result<Vec<SearchRepository>>;
+    async fn search_repositories(&self, params: &SearchRepoParams)
+        -> Result<Vec<SearchRepository>>;
 }
 
 pub struct OctocrabService {
@@ -58,11 +59,7 @@ impl OctocrabService {
         Ok(Self { client })
     }
 
-    async fn load_repository(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<RepositoryInfo> {
+    async fn load_repository(&self, owner: &str, repo: &str) -> Result<RepositoryInfo> {
         let handle = self.client.repos(owner, repo);
         let repository = handle.get().await?;
         Ok(Self::map_repository(repository, owner))
@@ -204,25 +201,16 @@ impl OctocrabService {
             .send()
             .await?;
 
-        page
-            .items
+        page.items
             .into_iter()
             .next()
             .ok_or_else(|| GitFetcherError::NotFound(format!("commit '{reference}'")))
     }
 
-    async fn load_commit(
-        &self,
-        owner: &str,
-        repo: &str,
-        sha: &str,
-    ) -> Result<CommitInfo> {
+    async fn load_commit(&self, owner: &str, repo: &str, sha: &str) -> Result<CommitInfo> {
         let commit = self.fetch_commit_object(owner, repo, sha).await?;
         let message = commit.commit.message.clone();
-        let author_login = commit
-            .author
-            .as_ref()
-            .map(|author| author.login.clone());
+        let author_login = commit.author.as_ref().map(|author| author.login.clone());
         let authored_at = commit
             .commit
             .author
@@ -253,9 +241,7 @@ impl OctocrabService {
 
         match builder.send().await {
             Ok(content) => {
-                let text = content
-                    .decoded_content()
-                    .unwrap_or_else(|| String::new());
+                let text = content.decoded_content().unwrap_or_else(|| String::new());
                 Ok(Some(ReadmeContent {
                     text,
                     source_file: content.path.clone(),
@@ -279,9 +265,7 @@ impl GitHubService for OctocrabService {
         let revision = self
             .resolve_revision(owner, repo, &repository, params.rev.as_deref())
             .await?;
-        let commit = self
-            .load_commit(owner, repo, &revision.sha)
-            .await?;
+        let commit = self.load_commit(owner, repo, &revision.sha).await?;
 
         let readme = if params.include_readme {
             self.load_readme(
@@ -313,9 +297,7 @@ impl GitHubService for OctocrabService {
         rev: Option<&str>,
     ) -> Result<ProbeMetadata> {
         let repository = self.load_repository(owner, repo).await?;
-        let revision = self
-            .resolve_revision(owner, repo, &repository, rev)
-            .await?;
+        let revision = self.resolve_revision(owner, repo, &repository, rev).await?;
 
         let anchor_key = rev
             .map(|rev| rev.to_string())
@@ -343,10 +325,7 @@ impl GitHubService for OctocrabService {
             query.push_str(&format!(" stars:>={}", min_stars));
         }
 
-        let per_page = params
-            .limit
-            .map(|limit| limit.min(100) as u8)
-            .unwrap_or(30);
+        let per_page = params.limit.map(|limit| limit.min(100) as u8).unwrap_or(30);
 
         let mut page = self
             .client
