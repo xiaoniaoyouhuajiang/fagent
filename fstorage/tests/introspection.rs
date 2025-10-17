@@ -53,7 +53,11 @@ impl Fetcher for MockFetcher {
                 kind: "node",
                 name: Function::ENTITY_TYPE.to_string(),
                 table_path: Function::table_name(),
-                primary_keys: vec!["name".to_string()],
+                primary_keys: vec![
+                    "version_sha".to_string(),
+                    "file_path".to_string(),
+                    "name".to_string(),
+                ],
             }],
             default_ttl_secs: Some(900),
             examples: vec![json!({"repo": "example/repo"})],
@@ -80,6 +84,8 @@ impl Fetcher for MockFetcher {
     ) -> fstorage::errors::Result<FetchResponse> {
         let mut graph = GraphData::new();
         graph.add_entities(vec![Function {
+            version_sha: Some("version-sha-introspect".to_string()),
+            file_path: Some("src/introspect.rs".to_string()),
             name: Some("function::introspect".to_string()),
             signature: Some("fn introspect()".to_string()),
             start_line: Some(1),
@@ -109,6 +115,8 @@ async fn storage_introspection_reports_capabilities_and_tables() -> anyhow::Resu
     // Exercise the data path to create tables and ingestion offsets.
     let mut graph = GraphData::new();
     graph.add_entities(vec![Function {
+        version_sha: Some("version-sha-entity".to_string()),
+        file_path: Some("src/a.rs".to_string()),
         name: Some("function::a".to_string()),
         signature: Some("fn a()".to_string()),
         start_line: Some(1),

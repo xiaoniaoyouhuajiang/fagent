@@ -28,17 +28,41 @@ async fn query_api_covers_hot_and_cold_paths() -> anyhow::Result<()> {
     let function_a = "function::root";
     let function_b = "function::child";
     let function_c = "function::leaf";
+    let version_sha = "version-sha-1";
+    let file_path_a = "src/root.rs";
+    let file_path_b = "src/child.rs";
+    let file_path_c = "src/leaf.rs";
 
-    let node_a_id =
-        utils::id::stable_node_id_u128(Function::ENTITY_TYPE, &[("name", function_a.to_string())]);
-    let node_b_id =
-        utils::id::stable_node_id_u128(Function::ENTITY_TYPE, &[("name", function_b.to_string())]);
-    let node_c_id =
-        utils::id::stable_node_id_u128(Function::ENTITY_TYPE, &[("name", function_c.to_string())]);
+    let node_a_id = utils::id::stable_node_id_u128(
+        Function::ENTITY_TYPE,
+        &[
+            ("version_sha", version_sha.to_string()),
+            ("file_path", file_path_a.to_string()),
+            ("name", function_a.to_string()),
+        ],
+    );
+    let node_b_id = utils::id::stable_node_id_u128(
+        Function::ENTITY_TYPE,
+        &[
+            ("version_sha", version_sha.to_string()),
+            ("file_path", file_path_b.to_string()),
+            ("name", function_b.to_string()),
+        ],
+    );
+    let node_c_id = utils::id::stable_node_id_u128(
+        Function::ENTITY_TYPE,
+        &[
+            ("version_sha", version_sha.to_string()),
+            ("file_path", file_path_c.to_string()),
+            ("name", function_c.to_string()),
+        ],
+    );
 
     let mut node_data = GraphData::new();
     node_data.add_entities(vec![
         Function {
+            version_sha: Some(version_sha.to_string()),
+            file_path: Some(file_path_a.to_string()),
             name: Some(function_a.to_string()),
             signature: Some("fn root()".to_string()),
             start_line: Some(1),
@@ -46,6 +70,8 @@ async fn query_api_covers_hot_and_cold_paths() -> anyhow::Result<()> {
             is_component: Some(true),
         },
         Function {
+            version_sha: Some(version_sha.to_string()),
+            file_path: Some(file_path_b.to_string()),
             name: Some(function_b.to_string()),
             signature: Some("fn child()".to_string()),
             start_line: Some(11),
@@ -53,6 +79,8 @@ async fn query_api_covers_hot_and_cold_paths() -> anyhow::Result<()> {
             is_component: Some(false),
         },
         Function {
+            version_sha: Some(version_sha.to_string()),
+            file_path: Some(file_path_c.to_string()),
             name: Some(function_c.to_string()),
             signature: Some("fn leaf()".to_string()),
             start_line: Some(21),
@@ -108,7 +136,14 @@ async fn query_api_covers_hot_and_cold_paths() -> anyhow::Result<()> {
 
     let node_from_keys = ctx
         .lake
-        .get_node_by_keys(Function::ENTITY_TYPE, &[("name", function_b)])
+        .get_node_by_keys(
+            Function::ENTITY_TYPE,
+            &[
+                ("version_sha", version_sha),
+                ("file_path", file_path_b),
+                ("name", function_b),
+            ],
+        )
         .await?
         .expect("node fetched by keys");
     assert_eq!(get_scalar(&node_from_keys, "name"), Some(function_b));
@@ -228,7 +263,14 @@ async fn query_api_covers_hot_and_cold_paths() -> anyhow::Result<()> {
 
     let node_from_keys_cold = ctx
         .lake
-        .get_node_by_keys(Function::ENTITY_TYPE, &[("name", function_b)])
+        .get_node_by_keys(
+            Function::ENTITY_TYPE,
+            &[
+                ("version_sha", version_sha),
+                ("file_path", file_path_b),
+                ("name", function_b),
+            ],
+        )
         .await?
         .expect("node by keys should work via lake");
     assert_eq!(get_scalar(&node_from_keys_cold, "name"), Some(function_b));

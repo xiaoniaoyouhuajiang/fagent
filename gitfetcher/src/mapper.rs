@@ -177,7 +177,12 @@ async fn append_code_graph(graph: &mut GraphData, snapshot: &RepoSnapshot) -> St
     .await?;
 
     let code_graph = workspace.build_graph().await?;
-    translate_ast_graph(graph, &code_graph, snapshot.commit.authored_at)?;
+    translate_ast_graph(
+        graph,
+        &code_graph,
+        snapshot.commit.authored_at,
+        &snapshot.revision.sha,
+    )?;
     Ok(())
 }
 
@@ -314,12 +319,13 @@ fn translate_ast_graph(
     graph: &mut GraphData,
     code_graph: &BTreeMapGraph,
     commit_ts: DateTime<Utc>,
+    version_sha: &str,
 ) -> StorageResult<()> {
     let mut descriptors: HashMap<String, NodeDescriptor> = HashMap::new();
     let mut nodes = NodeBuckets::default();
 
     for (key, node) in &code_graph.nodes {
-        if let Some(mapped) = map_ast_node(node) {
+        if let Some(mapped) = map_ast_node(node, version_sha) {
             match mapped {
                 MappedNode::File(value, descriptor) => {
                     descriptors.insert(key.clone(), descriptor);
@@ -457,7 +463,7 @@ mod tests {
         );
         code_graph.add_edge(contains_edge);
 
-        translate_ast_graph(&mut graph, &code_graph, Utc::now()).expect("translate");
+        translate_ast_graph(&mut graph, &code_graph, Utc::now(), "deadbeef").expect("translate");
 
         let mut entity_types: Vec<_> = graph
             .entities
@@ -472,7 +478,7 @@ mod tests {
     }
 }
 
-fn map_ast_node(node: &AstNode) -> Option<MappedNode> {
+fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
     match node.node_type {
         NodeType::File => {
             let path = optional_string(&node.node_data.file)
@@ -493,12 +499,23 @@ fn map_ast_node(node: &AstNode) -> Option<MappedNode> {
         NodeType::Class => {
             let name = optional_string(&node.node_data.name)?;
             let (start_line, end_line) = line_bounds(&node.node_data);
+            let file_path = node_file_path(&node.node_data)?;
+            let version_sha_owned = version_sha.to_owned();
             let descriptor = NodeDescriptor::new(
                 Class::ENTITY_TYPE,
-                uuid_from_node(Class::ENTITY_TYPE, &[("name", name.clone())]),
+                uuid_from_node(
+                    Class::ENTITY_TYPE,
+                    &[
+                        ("version_sha", version_sha_owned.clone()),
+                        ("file_path", file_path.clone()),
+                        ("name", name.clone()),
+                    ],
+                ),
             );
             Some(MappedNode::Class(
                 Class {
+                    version_sha: Some(version_sha_owned),
+                    file_path: Some(file_path),
                     name: Some(name),
                     start_line,
                     end_line,
@@ -528,12 +545,23 @@ fn map_ast_node(node: &AstNode) -> Option<MappedNode> {
             let signature = meta_value(&node.node_data, "signature")
                 .or_else(|| meta_value(&node.node_data, "interface"));
             let is_component = bool_from_meta(&node.node_data, "component");
+            let file_path = node_file_path(&node.node_data)?;
+            let version_sha_owned = version_sha.to_owned();
             let descriptor = NodeDescriptor::new(
                 Function::ENTITY_TYPE,
-                uuid_from_node(Function::ENTITY_TYPE, &[("name", name.clone())]),
+                uuid_from_node(
+                    Function::ENTITY_TYPE,
+                    &[
+                        ("version_sha", version_sha_owned.clone()),
+                        ("file_path", file_path.clone()),
+                        ("name", name.clone()),
+                    ],
+                ),
             );
             Some(MappedNode::Function(
                 Function {
+                    version_sha: Some(version_sha_owned),
+                    file_path: Some(file_path),
                     name: Some(name),
                     signature,
                     start_line,
@@ -645,6 +673,12 @@ fn line_number(value: usize) -> Option<i32> {
 
 fn meta_value(data: &NodeData, key: &str) -> Option<String> {
     data.meta.get(key).cloned()
+}
+
+fn node_file_path(data: &NodeData) -> Option<String> {
+    optional_string(&data.file)
+        .or_else(|| meta_value(data, "file_path"))
+        .or_else(|| meta_value(data, "file"))
 }
 
 fn bool_from_meta(data: &NodeData, key: &str) -> Option<bool> {

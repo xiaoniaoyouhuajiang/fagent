@@ -50,7 +50,11 @@ impl Fetcher for MockFetcher {
                 kind: "node",
                 name: Function::ENTITY_TYPE.to_string(),
                 table_path: Function::table_name(),
-                primary_keys: vec!["name".to_string()],
+                primary_keys: vec![
+                    "version_sha".to_string(),
+                    "file_path".to_string(),
+                    "name".to_string(),
+                ],
             }],
             default_ttl_secs: Some(3600),
             examples: vec![json!({"repo": "example/repo"})],
@@ -77,6 +81,8 @@ impl Fetcher for MockFetcher {
     ) -> fstorage::errors::Result<FetchResponse> {
         let mut graph_data = GraphData::new();
         graph_data.add_entities(vec![Function {
+            version_sha: Some("version-sha-3".to_string()),
+            file_path: Some("src/mock.rs".to_string()),
             name: Some("function::mock".to_string()),
             signature: Some("fn mock()".to_string()),
             start_line: Some(1),

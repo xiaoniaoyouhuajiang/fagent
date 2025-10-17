@@ -16,14 +16,31 @@ async fn helix_and_delta_edge_queries_both_succeed() -> anyhow::Result<()> {
     // Prepare two function nodes that will be connected via Helix-managed edges.
     let from_name = "function::main";
     let to_name = "function::helper";
-    let from_node_id =
-        utils::id::stable_node_id_u128(Function::ENTITY_TYPE, &[("name", from_name.to_string())]);
-    let to_node_id =
-        utils::id::stable_node_id_u128(Function::ENTITY_TYPE, &[("name", to_name.to_string())]);
+    let version_sha = "version-sha-2";
+    let from_file_path = "src/main.rs";
+    let to_file_path = "src/helper.rs";
+    let from_node_id = utils::id::stable_node_id_u128(
+        Function::ENTITY_TYPE,
+        &[
+            ("version_sha", version_sha.to_string()),
+            ("file_path", from_file_path.to_string()),
+            ("name", from_name.to_string()),
+        ],
+    );
+    let to_node_id = utils::id::stable_node_id_u128(
+        Function::ENTITY_TYPE,
+        &[
+            ("version_sha", version_sha.to_string()),
+            ("file_path", to_file_path.to_string()),
+            ("name", to_name.to_string()),
+        ],
+    );
 
     let mut node_data = GraphData::new();
     node_data.add_entities(vec![
         Function {
+            version_sha: Some(version_sha.to_string()),
+            file_path: Some(from_file_path.to_string()),
             name: Some(from_name.to_string()),
             signature: Some("fn main()".to_string()),
             start_line: Some(1),
@@ -31,6 +48,8 @@ async fn helix_and_delta_edge_queries_both_succeed() -> anyhow::Result<()> {
             is_component: Some(true),
         },
         Function {
+            version_sha: Some(version_sha.to_string()),
+            file_path: Some(to_file_path.to_string()),
             name: Some(to_name.to_string()),
             signature: Some("fn helper()".to_string()),
             start_line: Some(11),

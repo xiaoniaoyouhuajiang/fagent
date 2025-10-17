@@ -72,6 +72,8 @@ schema::3 {
 
     // Represents a class, module, or namespace
     N::CLASS {
+        INDEX version_sha: String,
+        INDEX file_path: String,
         INDEX name: String,
         start_line: I32,
         end_line: I32,
@@ -86,6 +88,8 @@ schema::3 {
 
     // Represents a function or method
     N::FUNCTION {
+        INDEX version_sha: String,
+        INDEX file_path: String,
         INDEX name: String,
         signature: String,
         start_line: I32,

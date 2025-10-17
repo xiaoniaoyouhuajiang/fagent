@@ -513,9 +513,13 @@ impl FStorageSynchronizer {
                     }
                 }
             } else {
-                let pk_pairs: Vec<(&str, String)> = pk_values
+                let pk_pairs: Vec<(&str, String)> = primary_keys
                     .iter()
-                    .filter_map(|(k, v)| v.clone().map(|val| (k.as_str(), val)))
+                    .filter_map(|key| {
+                        pk_values
+                            .get(key)
+                            .and_then(|value| value.clone().map(|val| (key.as_str(), val)))
+                    })
                     .collect();
                 if pk_pairs.len() != primary_keys.len() || pk_pairs.is_empty() {
                     log::warn!(
