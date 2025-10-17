@@ -12,7 +12,9 @@ pub mod utils;
 
 use crate::catalog::Catalog;
 use crate::config::StorageConfig;
-use crate::embedding::{EmbeddingProvider, NullEmbeddingProvider, OpenAIProvider};
+use crate::embedding::{
+    EmbeddingProvider, FastEmbedProvider, NullEmbeddingProvider, OpenAIProvider,
+};
 use crate::errors::Result;
 use crate::fetch::{Fetcher, FetcherCapability};
 use crate::lake::Lake;
@@ -67,12 +69,21 @@ impl FStorage {
             .unwrap_or_else(|| "text-embedding-ada-002".to_string());
         let embedding_provider: Arc<dyn EmbeddingProvider> = match std::env::var("OPENAI_API_KEY") {
             Ok(key) => Arc::new(OpenAIProvider::new(embedding_model, key)),
-            Err(_) => {
-                log::warn!(
-                    "OPENAI_API_KEY not found, using NullEmbeddingProvider. Vector embeddings will be empty."
-                );
-                Arc::new(NullEmbeddingProvider)
-            }
+            Err(_) => match FastEmbedProvider::new_default() {
+                Ok(provider) => {
+                    log::info!(
+                        "FASTEMBED backend initialized (no OPENAI_API_KEY present); vectors will be generated locally."
+                    );
+                    Arc::new(provider)
+                }
+                Err(err) => {
+                    log::warn!(
+                        "FASTEMBED initialization failed ({}); falling back to NullEmbeddingProvider. Vector embeddings will be empty.",
+                        err
+                    );
+                    Arc::new(NullEmbeddingProvider)
+                }
+            },
         };
 
         let synchronizer = Arc::new(FStorageSynchronizer::new(

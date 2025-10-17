@@ -2458,6 +2458,7 @@ dependencies = [
  "deltalake",
  "dotenvy",
  "env_logger",
+ "fastembed",
  "heck 0.5.0",
  "heed3",
  "helix-db 1.0.138",

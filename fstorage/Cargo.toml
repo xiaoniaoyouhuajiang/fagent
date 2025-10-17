@@ -26,6 +26,7 @@ bincode = "1.3.3"
 heed3 = "0.22.0"
 dotenvy = "0.15.7"
 rustworkx-core = "0.17.1"
+fastembed = "5.2.0"
 
 [build-dependencies]
 helix-db = { git = "https://github.com/HelixDB/helix-db", features = ["full"] }
