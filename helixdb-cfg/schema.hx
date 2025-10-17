@@ -1,6 +1,6 @@
 // HelixDB Schema for a GitHub Analysis Platform
-// Version 3: Implements the Snapshot Model for versioning and aligns code-level nodes with stackgraph-ast.
-schema::3 {
+// Version 4: Implements the Snapshot Model for versioning and aligns code-level nodes with stackgraph-ast.
+schema::4 {
     // =====================================================================
     // Section 1: Project & Metadata Nodes (N::)
     // =====================================================================
@@ -60,6 +60,7 @@ schema::3 {
 
     // Represents a code file within a version snapshot
     N::FILE {
+        INDEX version_sha: String,
         INDEX path: String,         // Relative path within the repo, e.g., "src/main.rs"
         language: String,
     }
@@ -81,6 +82,8 @@ schema::3 {
 
     // Represents a language-level trait or interface
     N::TRAIT {
+        INDEX version_sha: String,
+        INDEX file_path: String,
         INDEX name: String,
         start_line: I32,
         end_line: I32,
@@ -99,6 +102,8 @@ schema::3 {
 
     // Represents a struct, interface, enum, etc.
     N::DATA_MODEL {
+        INDEX version_sha: String,
+        INDEX file_path: String,
         INDEX name: String,
         construct: String,          // "struct", "interface", "enum"
         start_line: I32,
@@ -107,12 +112,16 @@ schema::3 {
 
     // Represents a variable declaration
     N::VARIABLE {
+        INDEX version_sha: String,
+        INDEX file_path: String,
         INDEX name: String,
         data_type: String,
     }
 
     // Represents a test function
     N::TEST {
+        INDEX version_sha: String,
+        INDEX file_path: String,
         INDEX name: String,
         test_kind: String,          // "unit", "integration", "e2e"
         start_line: I32,
@@ -121,6 +130,8 @@ schema::3 {
 
     // Represents a web API endpoint (for web projects)
     N::ENDPOINT {
+        INDEX version_sha: String,
+        INDEX file_path: String,
         INDEX path: String,         // API path, e.g., "/api/users/:id"
         http_method: String,        // "GET", "POST", etc.
     }

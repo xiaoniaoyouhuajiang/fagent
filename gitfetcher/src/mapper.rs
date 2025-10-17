@@ -90,7 +90,7 @@ pub async fn build_repo_snapshot_graph(
             &version_node_id,
             &commit_node_id,
         )),
-        from_node_id: Some(version_node_id),
+        from_node_id: Some(version_node_id.clone()),
         to_node_id: Some(commit_node_id),
         from_node_type: Some(Version::ENTITY_TYPE.to_string()),
         to_node_type: Some(Commit::ENTITY_TYPE.to_string()),
@@ -160,13 +160,17 @@ pub async fn build_repo_snapshot_graph(
     }
 
     if params.include_code {
-        append_code_graph(&mut graph, snapshot).await?;
+        append_code_graph(&mut graph, snapshot, &version_node_id).await?;
     }
 
     Ok(graph)
 }
 
-async fn append_code_graph(graph: &mut GraphData, snapshot: &RepoSnapshot) -> StorageResult<()> {
+async fn append_code_graph(
+    graph: &mut GraphData,
+    snapshot: &RepoSnapshot,
+    version_node_id: &str,
+) -> StorageResult<()> {
     let repo = &snapshot.repository;
     let clone_source = repo_clone_source(repo);
     let workspace = prepare_workspace(WorkspaceConfig {
@@ -177,11 +181,13 @@ async fn append_code_graph(graph: &mut GraphData, snapshot: &RepoSnapshot) -> St
     .await?;
 
     let code_graph = workspace.build_graph().await?;
+    let version_descriptor = NodeDescriptor::new(Version::ENTITY_TYPE, version_node_id.to_string());
     translate_ast_graph(
         graph,
         &code_graph,
         snapshot.commit.authored_at,
         &snapshot.revision.sha,
+        &version_descriptor,
     )?;
     Ok(())
 }
@@ -199,6 +205,7 @@ fn repo_clone_source(repo: &RepositoryInfo) -> String {
     }
 }
 
+#[derive(Clone)]
 struct NodeDescriptor {
     entity_type: &'static str,
     node_id: String,
@@ -320,6 +327,7 @@ fn translate_ast_graph(
     code_graph: &BTreeMapGraph,
     commit_ts: DateTime<Utc>,
     version_sha: &str,
+    version_descriptor: &NodeDescriptor,
 ) -> StorageResult<()> {
     let mut descriptors: HashMap<String, NodeDescriptor> = HashMap::new();
     let mut nodes = NodeBuckets::default();
@@ -370,6 +378,15 @@ fn translate_ast_graph(
     nodes.flush(graph);
 
     let mut edges = EdgeBuckets::default();
+
+    for descriptor in descriptors.values() {
+        if descriptor.entity_type == File::ENTITY_TYPE {
+            edges
+                .contains
+                .push(make_contains(version_descriptor, descriptor, commit_ts));
+        }
+    }
+
     for (source_key, target_key, edge_type) in &code_graph.edges {
         let Some(source_desc) = descriptors.get(source_key) else {
             continue;
@@ -463,7 +480,18 @@ mod tests {
         );
         code_graph.add_edge(contains_edge);
 
-        translate_ast_graph(&mut graph, &code_graph, Utc::now(), "deadbeef").expect("translate");
+        let version_descriptor = NodeDescriptor::new(
+            Version::ENTITY_TYPE,
+            uuid_from_node(Version::ENTITY_TYPE, &[("sha", "deadbeef".to_string())]),
+        );
+        translate_ast_graph(
+            &mut graph,
+            &code_graph,
+            Utc::now(),
+            "deadbeef",
+            &version_descriptor,
+        )
+        .expect("translate");
 
         let mut entity_types: Vec<_> = graph
             .entities
@@ -484,12 +512,20 @@ fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
             let path = optional_string(&node.node_data.file)
                 .or_else(|| optional_string(&node.node_data.name))?;
             let language = meta_value(&node.node_data, "language");
+            let version_sha_owned = version_sha.to_owned();
             let descriptor = NodeDescriptor::new(
                 File::ENTITY_TYPE,
-                uuid_from_node(File::ENTITY_TYPE, &[("path", path.clone())]),
+                uuid_from_node(
+                    File::ENTITY_TYPE,
+                    &[
+                        ("version_sha", version_sha_owned.clone()),
+                        ("path", path.clone()),
+                    ],
+                ),
             );
             Some(MappedNode::File(
                 File {
+                    version_sha: Some(version_sha_owned),
                     path: Some(path),
                     language,
                 },
@@ -526,12 +562,23 @@ fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
         NodeType::Trait => {
             let name = optional_string(&node.node_data.name)?;
             let (start_line, end_line) = line_bounds(&node.node_data);
+            let file_path = node_file_path(&node.node_data)?;
+            let version_sha_owned = version_sha.to_owned();
             let descriptor = NodeDescriptor::new(
                 Trait::ENTITY_TYPE,
-                uuid_from_node(Trait::ENTITY_TYPE, &[("name", name.clone())]),
+                uuid_from_node(
+                    Trait::ENTITY_TYPE,
+                    &[
+                        ("version_sha", version_sha_owned.clone()),
+                        ("file_path", file_path.clone()),
+                        ("name", name.clone()),
+                    ],
+                ),
             );
             Some(MappedNode::Trait(
                 Trait {
+                    version_sha: Some(version_sha_owned),
+                    file_path: Some(file_path),
                     name: Some(name),
                     start_line,
                     end_line,
@@ -576,12 +623,23 @@ fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
             let (start_line, end_line) = line_bounds(&node.node_data);
             let construct = meta_value(&node.node_data, "construct")
                 .or_else(|| meta_value(&node.node_data, "type"));
+            let file_path = node_file_path(&node.node_data)?;
+            let version_sha_owned = version_sha.to_owned();
             let descriptor = NodeDescriptor::new(
                 DataModel::ENTITY_TYPE,
-                uuid_from_node(DataModel::ENTITY_TYPE, &[("name", name.clone())]),
+                uuid_from_node(
+                    DataModel::ENTITY_TYPE,
+                    &[
+                        ("version_sha", version_sha_owned.clone()),
+                        ("file_path", file_path.clone()),
+                        ("name", name.clone()),
+                    ],
+                ),
             );
             Some(MappedNode::DataModel(
                 DataModel {
+                    version_sha: Some(version_sha_owned),
+                    file_path: Some(file_path),
                     name: Some(name),
                     construct,
                     start_line,
@@ -592,12 +650,23 @@ fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
         }
         NodeType::Var => {
             let name = optional_string(&node.node_data.name)?;
+            let file_path = node_file_path(&node.node_data)?;
+            let version_sha_owned = version_sha.to_owned();
             let descriptor = NodeDescriptor::new(
                 Variable::ENTITY_TYPE,
-                uuid_from_node(Variable::ENTITY_TYPE, &[("name", name.clone())]),
+                uuid_from_node(
+                    Variable::ENTITY_TYPE,
+                    &[
+                        ("version_sha", version_sha_owned.clone()),
+                        ("file_path", file_path.clone()),
+                        ("name", name.clone()),
+                    ],
+                ),
             );
             Some(MappedNode::Variable(
                 Variable {
+                    version_sha: Some(version_sha_owned),
+                    file_path: Some(file_path),
                     name: Some(name),
                     data_type: node.node_data.data_type.clone(),
                 },
@@ -607,6 +676,8 @@ fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
         NodeType::UnitTest | NodeType::IntegrationTest | NodeType::E2eTest => {
             let name = optional_string(&node.node_data.name)?;
             let (start_line, end_line) = line_bounds(&node.node_data);
+            let file_path = node_file_path(&node.node_data)?;
+            let version_sha_owned = version_sha.to_owned();
             let test_kind = match node.node_type {
                 NodeType::UnitTest => "unit",
                 NodeType::IntegrationTest => "integration",
@@ -616,10 +687,19 @@ fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
             .to_string();
             let descriptor = NodeDescriptor::new(
                 Test::ENTITY_TYPE,
-                uuid_from_node(Test::ENTITY_TYPE, &[("name", name.clone())]),
+                uuid_from_node(
+                    Test::ENTITY_TYPE,
+                    &[
+                        ("version_sha", version_sha_owned.clone()),
+                        ("file_path", file_path.clone()),
+                        ("name", name.clone()),
+                    ],
+                ),
             );
             Some(MappedNode::Test(
                 Test {
+                    version_sha: Some(version_sha_owned),
+                    file_path: Some(file_path),
                     name: Some(name),
                     test_kind: Some(test_kind),
                     start_line,
@@ -632,12 +712,23 @@ fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
             let path = meta_value(&node.node_data, "path")
                 .or_else(|| optional_string(&node.node_data.name))?;
             let http_method = meta_value(&node.node_data, "verb");
+            let file_path = node_file_path(&node.node_data)?;
+            let version_sha_owned = version_sha.to_owned();
             let descriptor = NodeDescriptor::new(
                 Endpoint::ENTITY_TYPE,
-                uuid_from_node(Endpoint::ENTITY_TYPE, &[("path", path.clone())]),
+                uuid_from_node(
+                    Endpoint::ENTITY_TYPE,
+                    &[
+                        ("version_sha", version_sha_owned.clone()),
+                        ("file_path", file_path.clone()),
+                        ("path", path.clone()),
+                    ],
+                ),
             );
             Some(MappedNode::Endpoint(
                 Endpoint {
+                    version_sha: Some(version_sha_owned),
+                    file_path: Some(file_path),
                     path: Some(path),
                     http_method,
                 },
