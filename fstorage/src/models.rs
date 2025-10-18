@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 
 use crate::fetch::ProbeReport;
 
@@ -43,6 +45,28 @@ pub struct ColumnSummary {
 pub struct TableSummary {
     pub table_path: String,
     pub columns: Vec<ColumnSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TextSearchHit {
+    pub score: f32,
+    pub node: HashMap<String, JsonValue>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct VectorSearchHit {
+    pub distance: f32,
+    pub similarity: f32,
+    pub vector: HashMap<String, JsonValue>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HybridSearchHit {
+    pub score: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<HashMap<String, JsonValue>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<HashMap<String, JsonValue>>,
 }
 
 #[derive(Debug, Clone)]

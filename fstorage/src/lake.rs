@@ -1,6 +1,6 @@
 use crate::config::StorageConfig;
 use crate::errors::{Result, StorageError};
-use crate::models::{ColumnSummary, TableSummary};
+use crate::models::{ColumnSummary, HybridSearchHit, TableSummary, TextSearchHit, VectorSearchHit};
 use crate::utils;
 use chrono::{DateTime, Utc};
 use deltalake::DeltaTable;
@@ -17,13 +17,17 @@ use deltalake::datafusion::execution::context::SessionContext;
 use deltalake::kernel::Action;
 use deltalake::protocol::SaveMode;
 use deltalake::storage::{ObjectStoreRef, Path as ObjectPath};
+use heed3::RoTxn;
+use helix_db::helix_engine::bm25::bm25::BM25;
 use helix_db::helix_engine::storage_core::HelixGraphStorage;
 use helix_db::helix_engine::storage_core::storage_methods::StorageMethods;
 use helix_db::helix_engine::traversal_core::HelixGraphEngine;
-use helix_db::helix_engine::types::GraphError;
+use helix_db::helix_engine::types::{GraphError, VectorError};
+use helix_db::helix_engine::vector_core::hnsw::HNSW;
+use helix_db::helix_engine::vector_core::vector::HVector;
 use helix_db::protocol::value::Value as HelixValue;
 use helix_db::utils::items::{Edge, Node};
-use serde_json::{Map as JsonMap, Value as JsonValue};
+use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -389,6 +393,36 @@ impl Lake {
             JsonValue::Null
         };
         result.insert("properties".to_string(), properties);
+        result
+    }
+
+    fn vector_to_map(vector: HVector) -> HashMap<String, JsonValue> {
+        let mut result = HashMap::new();
+        result.insert(
+            "id".to_string(),
+            JsonValue::String(Uuid::from_u128(vector.id).to_string()),
+        );
+        if let Some(distance) = vector.distance {
+            if let Some(number) = JsonNumber::from_f64(distance) {
+                result.insert("distance".to_string(), JsonValue::Number(number));
+            }
+            let similarity = 1.0 / (1.0 + distance);
+            if let Some(number) = JsonNumber::from_f64(similarity) {
+                result.insert("similarity".to_string(), JsonValue::Number(number));
+            }
+        } else {
+            result.insert("distance".to_string(), JsonValue::Null);
+            result.insert("similarity".to_string(), JsonValue::Null);
+        }
+        if let Some(props) = vector.properties.clone() {
+            let mut json_map = JsonMap::new();
+            for (k, v) in props {
+                json_map.insert(k, Self::helix_value_to_json(&v));
+            }
+            result.insert("properties".to_string(), JsonValue::Object(json_map));
+        } else {
+            result.insert("properties".to_string(), JsonValue::Null);
+        }
         result
     }
 
@@ -1436,6 +1470,234 @@ impl Lake {
 
         tables.sort_by(|a, b| a.table_path.cmp(&b.table_path));
         Ok(tables)
+    }
+
+    pub async fn search_bm25(
+        &self,
+        entity_type: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<TextSearchHit>> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let bm25 = self.engine.storage.bm25.as_ref().ok_or_else(|| {
+            StorageError::SyncError("BM25 index is not enabled for this store".into())
+        })?;
+        let txn = self.engine.storage.graph_env.read_txn()?;
+        let limit = limit.max(1);
+        let raw_results = bm25
+            .search(&txn, trimmed, limit)
+            .map_err(StorageError::Graph)?;
+        let mut hits = Vec::with_capacity(raw_results.len());
+        for (doc_id, score) in raw_results {
+            match self.engine.storage.get_node(&txn, &doc_id) {
+                Ok(node) if node.label == entity_type => {
+                    hits.push(TextSearchHit {
+                        score,
+                        node: Self::node_to_map(node),
+                    });
+                }
+                Ok(_) => continue,
+                Err(GraphError::NodeNotFound) => continue,
+                Err(err) => return Err(StorageError::from(err)),
+            }
+        }
+        Ok(hits)
+    }
+
+    pub async fn search_vectors(
+        &self,
+        entity_type: &str,
+        query_vector: &[f64],
+        limit: usize,
+    ) -> Result<Vec<VectorSearchHit>> {
+        if query_vector.is_empty() {
+            return Ok(Vec::new());
+        }
+        let txn = self.engine.storage.graph_env.read_txn()?;
+        let limit = limit.max(1);
+        let results = match self
+            .engine
+            .storage
+            .vectors
+            .search::<fn(&HVector, &RoTxn) -> bool>(
+                &txn,
+                query_vector,
+                limit,
+                entity_type,
+                None,
+                false,
+            ) {
+            Ok(results) => results,
+            Err(VectorError::EntryPointNotFound) => Vec::new(),
+            Err(err) => return Err(StorageError::Graph(err.into())),
+        };
+        Ok(results
+            .into_iter()
+            .filter_map(|vector| {
+                let label_matches = vector
+                    .get_label()
+                    .map(|value| value.inner_stringify() == entity_type)
+                    .unwrap_or(true);
+                if !label_matches {
+                    return None;
+                }
+                let distance_f64 = vector.distance.unwrap_or(0.0);
+                let distance = distance_f64 as f32;
+                let similarity = (1.0 / (1.0 + distance_f64)) as f32;
+                Some(VectorSearchHit {
+                    distance,
+                    similarity,
+                    vector: Self::vector_to_map(vector),
+                })
+            })
+            .collect())
+    }
+
+    pub async fn search_hybrid(
+        &self,
+        entity_type: &str,
+        query_text: &str,
+        query_vector: &[f64],
+        alpha: f32,
+        limit: usize,
+    ) -> Result<Vec<HybridSearchHit>> {
+        if query_text.trim().is_empty() && query_vector.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let alpha = alpha.clamp(0.0, 1.0);
+        let limit = limit.max(1);
+
+        let bm25_handle = if !query_text.trim().is_empty() {
+            let storage = Arc::clone(&self.engine.storage);
+            let text = query_text.trim().to_string();
+            Some(tokio::task::spawn_blocking(
+                move || -> Result<Vec<(u128, f32)>> {
+                    let txn = storage.graph_env.read_txn()?;
+                    let bm25 = storage.bm25.as_ref().ok_or_else(|| {
+                        StorageError::SyncError("BM25 index is not enabled for this store".into())
+                    })?;
+                    bm25.search(&txn, &text, limit * 2)
+                        .map_err(StorageError::Graph)
+                },
+            ))
+        } else {
+            None
+        };
+
+        let vector_handle = if !query_vector.is_empty() {
+            let storage = Arc::clone(&self.engine.storage);
+            let query_vec: Vec<f64> = query_vector.to_vec();
+            let label = entity_type.to_string();
+            Some(tokio::task::spawn_blocking(
+                move || -> Result<Vec<HVector>> {
+                    let txn = storage.graph_env.read_txn()?;
+                    match storage
+                        .vectors
+                        .search::<fn(&HVector, &RoTxn) -> bool>(
+                            &txn,
+                            &query_vec,
+                            limit * 2,
+                            &label,
+                            None,
+                            false,
+                        ) {
+                        Ok(results) => Ok(results),
+                        Err(VectorError::EntryPointNotFound) => Ok(Vec::new()),
+                        Err(err) => Err(StorageError::Graph(err.into())),
+                    }
+                },
+            ))
+        } else {
+            None
+        };
+
+        let bm25_results = if let Some(handle) = bm25_handle {
+            handle
+                .await
+                .map_err(|e| StorageError::SyncError(format!("BM25 search task failed: {}", e)))??
+        } else {
+            Vec::new()
+        };
+
+        let vector_results = if let Some(handle) = vector_handle {
+            handle.await.map_err(|e| {
+                StorageError::SyncError(format!("Vector search task failed: {}", e))
+            })??
+        } else {
+            Vec::new()
+        };
+
+        let mut combined_scores: HashMap<u128, f32> = HashMap::new();
+        for (doc_id, score) in bm25_results {
+            combined_scores
+                .entry(doc_id)
+                .and_modify(|existing| *existing = existing.max(alpha * score))
+                .or_insert(alpha * score);
+        }
+
+        for vector in &vector_results {
+            let label_matches = vector
+                .get_label()
+                .map(|value| value.inner_stringify() == entity_type)
+                .unwrap_or(true);
+            if !label_matches {
+                continue;
+            }
+            let similarity = (1.0 / (1.0 + vector.distance.unwrap_or(0.0))) as f32;
+            combined_scores
+                .entry(vector.id)
+                .and_modify(|existing| *existing += (1.0 - alpha) * similarity)
+                .or_insert((1.0 - alpha) * similarity);
+        }
+
+        let mut entries: Vec<(u128, f32)> = combined_scores.into_iter().collect();
+        entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        entries.truncate(limit);
+
+        let txn = self.engine.storage.graph_env.read_txn()?;
+        let mut hits = Vec::with_capacity(entries.len());
+        for (doc_id, score) in entries {
+            match self.engine.storage.get_node(&txn, &doc_id) {
+                Ok(node) if node.label == entity_type => {
+                    hits.push(HybridSearchHit {
+                        score,
+                        node: Some(Self::node_to_map(node)),
+                        vector: None,
+                    });
+                }
+                Ok(_) => continue,
+                Err(GraphError::NodeNotFound) => {
+                    match self
+                        .engine
+                        .storage
+                        .vectors
+                        .get_vector(&txn, doc_id, 0, true)
+                    {
+                        Ok(vector)
+                            if vector
+                                .get_label()
+                                .map(|value| value.inner_stringify() == entity_type)
+                                .unwrap_or(true) =>
+                        {
+                            hits.push(HybridSearchHit {
+                                score,
+                                node: None,
+                                vector: Some(Self::vector_to_map(vector)),
+                            });
+                        }
+                        Ok(_) => continue,
+                        Err(err) => return Err(StorageError::Graph(err.into())),
+                    }
+                }
+                Err(err) => return Err(StorageError::from(err)),
+            }
+        }
+
+        Ok(hits)
     }
 }
 

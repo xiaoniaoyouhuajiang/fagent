@@ -18,7 +18,10 @@ use crate::embedding::{
 use crate::errors::Result;
 use crate::fetch::{Fetcher, FetcherCapability};
 use crate::lake::Lake;
-use crate::models::{EntityIdentifier, EntityMetadata, ReadinessReport, TableSummary};
+use crate::models::{
+    EntityIdentifier, EntityMetadata, HybridSearchHit, ReadinessReport, TableSummary,
+    TextSearchHit, VectorSearchHit,
+};
 use crate::sync::{DataSynchronizer, FStorageSynchronizer};
 use helix_db::helix_engine::traversal_core::{HelixGraphEngine, HelixGraphEngineOpts};
 use std::collections::HashMap;
@@ -33,6 +36,7 @@ pub struct FStorage {
     pub lake: Arc<Lake>,
     pub engine: Arc<HelixGraphEngine>,
     pub synchronizer: Arc<FStorageSynchronizer>,
+    embedding_provider: Arc<dyn EmbeddingProvider>,
 }
 
 impl FStorage {
@@ -99,6 +103,7 @@ impl FStorage {
             lake,
             engine,
             synchronizer,
+            embedding_provider,
         })
     }
 
@@ -143,6 +148,73 @@ impl FStorage {
         entities: &[EntityIdentifier],
     ) -> Result<HashMap<String, ReadinessReport>> {
         self.synchronizer.check_readiness(entities).await
+    }
+
+    pub async fn search_text_bm25(
+        &self,
+        entity_type: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<TextSearchHit>> {
+        self.lake.search_bm25(entity_type, query, limit).await
+    }
+
+    pub async fn search_vectors(
+        &self,
+        entity_type: &str,
+        query_vector: &[f64],
+        limit: usize,
+    ) -> Result<Vec<VectorSearchHit>> {
+        self.lake
+            .search_vectors(entity_type, query_vector, limit)
+            .await
+    }
+
+    pub async fn search_vectors_by_text(
+        &self,
+        entity_type: &str,
+        query_text: &str,
+        limit: usize,
+    ) -> Result<Vec<VectorSearchHit>> {
+        let trimmed = query_text.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let embedding = self
+            .embedding_provider
+            .embed(vec![trimmed.to_string()])
+            .await?;
+        let vector = embedding.into_iter().next().unwrap_or_default();
+        self.search_vectors(entity_type, &vector, limit).await
+    }
+
+    pub async fn search_hybrid(
+        &self,
+        entity_type: &str,
+        query_text: &str,
+        alpha: f32,
+        limit: usize,
+    ) -> Result<Vec<HybridSearchHit>> {
+        let trimmed = query_text.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let embedding = self
+            .embedding_provider
+            .embed(vec![trimmed.to_string()])
+            .await?;
+        let vector = embedding.into_iter().next().unwrap_or_default();
+        self.lake
+            .search_hybrid(entity_type, trimmed, &vector, alpha, limit)
+            .await
+    }
+
+    pub async fn embed_texts(&self, texts: Vec<String>) -> Result<Vec<Vec<f64>>> {
+        self.embedding_provider.embed(texts).await
+    }
+
+    pub fn embedding_provider(&self) -> Arc<dyn EmbeddingProvider> {
+        Arc::clone(&self.embedding_provider)
     }
 }
 

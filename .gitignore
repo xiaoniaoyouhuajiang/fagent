@@ -6,5 +6,6 @@
 **/.env
 **/*.pest
 **/*.txt
+**/.fastembed_cache/
 /references
 /deps
