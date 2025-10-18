@@ -1595,16 +1595,14 @@ impl Lake {
             Some(tokio::task::spawn_blocking(
                 move || -> Result<Vec<HVector>> {
                     let txn = storage.graph_env.read_txn()?;
-                    match storage
-                        .vectors
-                        .search::<fn(&HVector, &RoTxn) -> bool>(
-                            &txn,
-                            &query_vec,
-                            limit * 2,
-                            &label,
-                            None,
-                            false,
-                        ) {
+                    match storage.vectors.search::<fn(&HVector, &RoTxn) -> bool>(
+                        &txn,
+                        &query_vec,
+                        limit * 2,
+                        &label,
+                        None,
+                        false,
+                    ) {
                         Ok(results) => Ok(results),
                         Err(VectorError::EntryPointNotFound) => Ok(Vec::new()),
                         Err(err) => Err(StorageError::Graph(err.into())),

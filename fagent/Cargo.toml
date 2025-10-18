@@ -6,3 +6,18 @@ edition = "2021"
 [dependencies]
 gitfetcher = { path = "../gitfetcher" }
 econfetcher = { path = "../econfetcher" }
+fstorage = { path = "../fstorage" }
+axum = { version = "0.7", features = ["macros", "json"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4.5", features = ["derive", "env"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"
+tower = { version = "0.4", features = ["util"] }
+helix-db = { git = "https://github.com/HelixDB/helix-db", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3.10"
