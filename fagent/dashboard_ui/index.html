@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FStorage Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+</head>
+<body>
+    <header>
+        <h1>FStorage Dashboard</h1>
+        <button id="refresh-all">刷新全部</button>
+    </header>
+
+    <main>
+        <section id="status-section">
+            <div class="section-header">
+                <h2>存储状态</h2>
+                <button id="refresh-status">刷新</button>
+            </div>
+            <pre id="status-output" class="json-output">加载中…</pre>
+        </section>
+
+        <section id="fetcher-section">
+            <div class="section-header">
+                <h2>Fetcher 能力列表</h2>
+                <button id="refresh-fetchers">刷新</button>
+            </div>
+            <div id="fetcher-list"></div>
+        </section>
+
+        <section id="graph-section">
+            <div class="section-header">
+                <h2>图可视化</h2>
+                <div class="graph-controls">
+                    <label>
+                        节点数 (k)
+                        <input id="graph-limit" type="number" min="10" max="300" value="150" />
+                    </label>
+                    <label>
+                        标签属性
+                        <input id="graph-node-prop" type="text" placeholder="name" />
+                    </label>
+                    <button id="refresh-graph">刷新</button>
+                </div>
+            </div>
+            <div id="graph-container"></div>
+            <div id="graph-error" class="error-message"></div>
+        </section>
+
+        <section id="sync-section">
+            <div class="section-header">
+                <h2>触发同步</h2>
+                <button id="run-sync">执行</button>
+            </div>
+            <p class="hint">
+                选择 fetcher 并填写参数，点击“执行”即调用 `/api/sync` 发起一次增量同步。
+            </p>
+            <div class="sync-form">
+                <label>
+                    Fetcher
+                    <input list="fetcher-options" id="sync-fetcher" placeholder="gitfetcher" />
+                </label>
+                <label>
+                    触发语句
+                    <input id="sync-query" type="text" placeholder="来自用户问题的上下文（可选）" />
+                </label>
+                <label>
+                    预算类型
+                    <select id="sync-budget-type">
+                        <option value="request_count" selected>请求次数</option>
+                        <option value="duration_secs">持续时长</option>
+                    </select>
+                </label>
+                <label>
+                    预算值
+                    <input id="sync-budget-value" type="number" min="1" value="100" />
+                </label>
+            </div>
+            <label class="stack">
+                Fetch Params (JSON)
+                <textarea id="sync-params" rows="4" placeholder='{"mode":"repo_snapshot","repo":"owner/name"}'></textarea>
+            </label>
+            <label class="stack">
+                Target Entities (JSON 数组，可选)
+                <textarea id="sync-targets" rows="3" placeholder='[{"uri":"repo://example/foo","entity_type":"Project"}]'></textarea>
+            </label>
+            <pre id="sync-output" class="json-output"></pre>
+            <datalist id="fetcher-options"></datalist>
+        </section>
+
+        <section id="tables-section">
+            <div class="section-header">
+                <h2>Delta 表</h2>
+                <div class="table-controls">
+                    <label>
+                        前缀
+                        <input id="table-prefix" type="text" placeholder="silver/" />
+                    </label>
+                    <button id="refresh-tables">查询</button>
+                </div>
+            </div>
+            <div id="tables-output"></div>
+        </section>
+
+        <section id="readiness-section">
+            <div class="section-header">
+                <h2>就绪度探测</h2>
+                <button id="run-readiness">请求探测</button>
+            </div>
+            <p class="hint">
+                输入 JSON 数组，元素格式为
+                {"uri": "...", "entity_type": "...", "fetcher_name": "gitfetcher"}
+            </p>
+            <textarea id="readiness-input" rows="6" placeholder='[{"uri":"repo://example/foo","entity_type":"Project","fetcher_name":"gitfetcher"}]'></textarea>
+            <pre id="readiness-output" class="json-output"></pre>
+        </section>
+    </main>
+
+    <footer>
+        <span>FStorage Dashboard · 状态监控与调度面板</span>
+    </footer>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>

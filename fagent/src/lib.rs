@@ -2,9 +2,10 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::Context;
 use axum::{
+    body::Body,
     extract::{Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -201,6 +202,10 @@ fn init_tracing() {
         .try_init();
 }
 
+const INDEX_HTML: &str = include_str!("../dashboard_ui/index.html");
+const STYLES_CSS: &str = include_str!("../dashboard_ui/styles.css");
+const APP_JS: &str = include_str!("../dashboard_ui/app.js");
+
 async fn run_dashboard(args: DashboardArgs) -> anyhow::Result<()> {
     let addr: SocketAddr = args.bind.parse().context("failed to parse bind address")?;
 
@@ -236,14 +241,42 @@ async fn run_dashboard(args: DashboardArgs) -> anyhow::Result<()> {
 
 /// Builds the HTTP router used by the dashboard service.
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let api = Router::new()
         .route("/api/fetchers", get(list_fetchers))
         .route("/api/status", get(get_status))
         .route("/api/tables", get(list_tables))
         .route("/api/graph/visual", get(graph_visual))
         .route("/api/readiness", post(check_readiness))
         .route("/api/sync", post(trigger_sync))
-        .with_state(state)
+        .with_state(state);
+
+    let static_routes = Router::new()
+        .route("/", get(serve_index))
+        .route("/styles.css", get(serve_styles))
+        .route("/app.js", get(serve_app_js))
+        .fallback(get(serve_index));
+
+    api.merge(static_routes)
+}
+
+async fn serve_index() -> Html<&'static str> {
+    Html(INDEX_HTML)
+}
+
+async fn serve_styles() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/css; charset=utf-8")
+        .body(Body::from(STYLES_CSS))
+        .unwrap()
+}
+
+async fn serve_app_js() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/javascript; charset=utf-8")
+        .body(Body::from(APP_JS))
+        .unwrap()
 }
 
 async fn list_fetchers(State(state): State<AppState>) -> ApiResult<Json<Vec<FetcherCapability>>> {

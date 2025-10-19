@@ -7,5 +7,6 @@
 **/*.pest
 **/*.txt
 **/.fastembed_cache/
+/temp
 /references
 /deps

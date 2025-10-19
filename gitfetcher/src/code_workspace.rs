@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 use ast::{
     lang::graphs::BTreeMapGraph,
@@ -7,7 +10,7 @@ use ast::{
 use fstorage::errors::{Result as StorageResult, StorageError};
 use git2::{
     build::{CheckoutBuilder, RepoBuilder},
-    FetchOptions, Repository,
+    FetchOptions, ProxyOptions, Repository,
 };
 use tempfile::TempDir;
 use tokio::task;
@@ -138,7 +141,14 @@ fn clone_and_checkout(repo_url: &str, dest: &Path, revision: &str) -> Result<(),
         })?;
     }
 
-    let repo = RepoBuilder::new()
+    let mut builder = RepoBuilder::new();
+    if let Some(proxy_options) = proxy_options_from_env(repo_url) {
+        let mut fetch_options = FetchOptions::new();
+        fetch_options.proxy_options(proxy_options);
+        builder.fetch_options(fetch_options);
+    }
+
+    let repo = builder
         .clone(repo_url, dest)
         .map_err(|err| StorageError::SyncError(format!("git clone failed: {err}")))?;
 
@@ -160,6 +170,11 @@ fn checkout_revision(repo: &Repository, revision: &str) -> Result<(), StorageErr
             })?;
             let mut fetch_options = FetchOptions::new();
             fetch_options.download_tags(git2::AutotagOption::All);
+            if let Some(proxy_options) =
+                proxy_options_from_env(remote.url().unwrap_or_default())
+            {
+                fetch_options.proxy_options(proxy_options);
+            }
             remote
                 .fetch(&[revision], Some(&mut fetch_options), None)
                 .map_err(|err| StorageError::SyncError(format!("git fetch failed: {err}")))?;
@@ -195,6 +210,64 @@ fn make_origin_url(display_name: &str, fallback_url: &str) -> String {
         candidate = stripped.to_string();
     }
     candidate
+}
+
+fn proxy_options_from_env(repo_url: &str) -> Option<ProxyOptions<'static>> {
+    let proxy_url = proxy_url_from_env(repo_url)?;
+    let mut options = ProxyOptions::new();
+    options.url(&proxy_url);
+    Some(options)
+}
+
+fn proxy_url_from_env(repo_url: &str) -> Option<String> {
+    let trimmed = repo_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let looks_remote = trimmed.contains("://") || trimmed.starts_with("git@");
+    if !looks_remote {
+        return None;
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    let keys: &[&str] = if lowered.starts_with("https://") {
+        &[
+            "https_proxy",
+            "HTTPS_PROXY",
+            "http_proxy",
+            "HTTP_PROXY",
+            "all_proxy",
+            "ALL_PROXY",
+        ]
+    } else if lowered.starts_with("http://") {
+        &["http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"]
+    } else if lowered.starts_with("ssh://") || trimmed.starts_with("git@") {
+        &[
+            "all_proxy",
+            "ALL_PROXY",
+            "https_proxy",
+            "HTTPS_PROXY",
+            "http_proxy",
+            "HTTP_PROXY",
+        ]
+    } else {
+        &[
+            "https_proxy",
+            "HTTPS_PROXY",
+            "http_proxy",
+            "HTTP_PROXY",
+            "all_proxy",
+            "ALL_PROXY",
+        ]
+    };
+
+    keys.iter().find_map(|key| {
+        env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 struct EnvVarGuard {
