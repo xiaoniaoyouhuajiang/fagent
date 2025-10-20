@@ -133,7 +133,17 @@ input {
     min-width: 120px;
 }
 
+select {
+    background: var(--surface-light);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 0.45rem 0.6rem;
+    min-width: 160px;
+}
+
 input:focus,
+select:focus,
 textarea:focus {
     outline: 1px solid var(--accent);
     box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.3);
@@ -144,6 +154,39 @@ textarea:focus {
     border-radius: 12px;
     background: rgba(15, 23, 42, 0.45);
     border: 1px solid var(--border);
+}
+
+.graph-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    align-items: center;
+    padding: 0.5rem 0.25rem 0;
+    min-height: 1.5rem;
+}
+
+.legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.25rem 0.6rem;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.15);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    font-size: 0.8rem;
+    color: var(--muted);
+}
+
+.legend-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    border: 2px solid transparent;
+    display: inline-block;
+}
+
+.hidden {
+    display: none !important;
 }
 
 .error-message {

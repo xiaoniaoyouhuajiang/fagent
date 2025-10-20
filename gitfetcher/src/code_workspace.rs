@@ -96,7 +96,8 @@ pub async fn prepare_workspace(config: WorkspaceConfig<'_>) -> StorageResult<Cod
         })?
         .to_string();
 
-    let _guard_lsp = EnvVarGuard::set("USE_LSP", Some("0"));
+    let use_lsp_setting = std::env::var("USE_LSP").unwrap_or_else(|_| "0".to_string());
+    let _guard_lsp = EnvVarGuard::set("USE_LSP", Some(use_lsp_setting.as_str()));
     let _guard_skip_post = EnvVarGuard::set("LSP_SKIP_POST_CLONE", Some("1"));
     let _guard_repo_path = EnvVarGuard::set("REPO_PATH", Some(&checkout_str));
 

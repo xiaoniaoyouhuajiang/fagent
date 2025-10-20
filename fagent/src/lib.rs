@@ -1,4 +1,9 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use anyhow::Context;
 use axum::{
@@ -143,6 +148,30 @@ struct GraphVisualQuery {
     node_prop: Option<String>,
 }
 
+#[derive(Clone, Deserialize)]
+struct GraphOverviewQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Deserialize)]
+struct GraphSubgraphQuery {
+    start_id: String,
+    #[serde(default)]
+    depth: Option<usize>,
+    #[serde(default)]
+    node_limit: Option<usize>,
+    #[serde(default)]
+    edge_limit: Option<usize>,
+    #[serde(default)]
+    edge_types: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+struct GraphNodeDetailQuery {
+    id: String,
+}
+
 #[derive(Deserialize)]
 struct SyncRequest {
     fetcher: String,
@@ -190,6 +219,44 @@ struct StatusResponse {
 #[derive(Serialize)]
 struct SyncResponse {
     message: String,
+}
+
+#[derive(Serialize)]
+struct GraphNodeSummary {
+    id: String,
+    entity_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct GraphOverviewResponse {
+    candidates: Vec<GraphNodeSummary>,
+}
+
+#[derive(Serialize, Clone)]
+struct GraphNodeDto {
+    id: String,
+    entity_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
+    properties: JsonValue,
+}
+
+#[derive(Serialize)]
+struct GraphEdgeDto {
+    id: String,
+    label: String,
+    from: String,
+    to: String,
+    properties: JsonValue,
+}
+
+#[derive(Serialize)]
+struct GraphSubgraphResponse {
+    center: GraphNodeDto,
+    nodes: Vec<GraphNodeDto>,
+    edges: Vec<GraphEdgeDto>,
 }
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -245,6 +312,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/fetchers", get(list_fetchers))
         .route("/api/status", get(get_status))
         .route("/api/tables", get(list_tables))
+        .route("/api/graph/overview", get(graph_overview))
+        .route("/api/graph/subgraph", get(graph_subgraph))
+        .route("/api/graph/node", get(graph_node_detail))
         .route("/api/graph/visual", get(graph_visual))
         .route("/api/readiness", post(check_readiness))
         .route("/api/sync", post(trigger_sync))
@@ -349,6 +419,270 @@ async fn graph_visual(
     let payload: JsonValue =
         serde_json::from_str(&raw).map_err(|err| ApiError::Internal(err.to_string()))?;
     Ok(Json(payload))
+}
+
+async fn graph_overview(
+    State(state): State<AppState>,
+    Query(query): Query<GraphOverviewQuery>,
+) -> ApiResult<Json<GraphOverviewResponse>> {
+    let limit = query.limit.unwrap_or(30).min(300).max(1);
+
+    let snapshot = {
+        let txn = state
+            .storage
+            .engine
+            .storage
+            .graph_env
+            .read_txn()
+            .map_err(|err| ApiError::Internal(err.to_string()))?;
+        let raw = state
+            .storage
+            .engine
+            .storage
+            .nodes_edges_to_json(&txn, Some(limit), None)
+            .map_err(|err| ApiError::from_storage(StorageError::Graph(err)))?;
+        raw
+    };
+
+    let parsed: JsonValue =
+        serde_json::from_str(&snapshot).map_err(|err| ApiError::Internal(err.to_string()))?;
+    let mut candidates = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    if let Some(nodes_array) = parsed.get("nodes").and_then(|value| value.as_array()) {
+        for node_value in nodes_array {
+            if candidates.len() >= limit {
+                break;
+            }
+
+            let node_id = node_value
+                .get("id")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string());
+            let Some(node_id) = node_id else {
+                continue;
+            };
+
+            if !seen.insert(node_id.clone()) {
+                continue;
+            }
+
+            let fetched = state
+                .storage
+                .lake
+                .get_node_by_id(&node_id, None)
+                .await
+                .map_err(ApiError::from_storage)?;
+
+            let Some(node_map) = fetched else {
+                continue;
+            };
+
+            if let Some(summary) = map_node_summary(node_map) {
+                candidates.push(summary);
+            }
+        }
+    }
+
+    Ok(Json(GraphOverviewResponse { candidates }))
+}
+
+async fn graph_subgraph(
+    State(state): State<AppState>,
+    Query(query): Query<GraphSubgraphQuery>,
+) -> ApiResult<Json<GraphSubgraphResponse>> {
+    let depth = query.depth.unwrap_or(1);
+    let node_limit = query.node_limit.unwrap_or(150);
+    let edge_limit = query.edge_limit.unwrap_or(200);
+    let edge_filters = parse_edge_types(query.edge_types.as_deref());
+    let edge_refs = edge_filters
+        .as_ref()
+        .map(|values| values.iter().map(String::as_str).collect::<Vec<&str>>());
+
+    let subgraph = state
+        .storage
+        .lake
+        .subgraph_bfs(
+            &query.start_id,
+            edge_refs.as_deref(),
+            depth,
+            node_limit,
+            edge_limit,
+        )
+        .await
+        .map_err(ApiError::from_storage)?;
+
+    let center_map = state
+        .storage
+        .lake
+        .get_node_by_id(&query.start_id, None)
+        .await
+        .map_err(ApiError::from_storage)?;
+    let center_map = center_map.ok_or_else(|| {
+        ApiError::NotFound(format!("未找到起始节点 '{}'", query.start_id))
+    })?;
+    let center_node = map_node_record(center_map)
+        .ok_or_else(|| ApiError::Internal("无法解析起始节点".to_string()))?;
+
+    let mut nodes: HashMap<String, GraphNodeDto> = HashMap::new();
+    nodes.insert(center_node.id.clone(), center_node.clone());
+    for node_map in subgraph.nodes {
+        if let Some(node) = map_node_record(node_map) {
+            nodes.entry(node.id.clone()).or_insert(node);
+        }
+    }
+
+    let mut edges = Vec::new();
+    for edge_map in subgraph.edges {
+        if let Some(edge) = map_edge_record(edge_map) {
+            edges.push(edge);
+        }
+    }
+
+    Ok(Json(GraphSubgraphResponse {
+        center: center_node,
+        nodes: nodes.into_values().collect(),
+        edges,
+    }))
+}
+
+async fn graph_node_detail(
+    State(state): State<AppState>,
+    Query(query): Query<GraphNodeDetailQuery>,
+) -> ApiResult<Json<GraphNodeDto>> {
+    let fetched = state
+        .storage
+        .lake
+        .get_node_by_id(&query.id, None)
+        .await
+        .map_err(ApiError::from_storage)?;
+    let node_map = fetched
+        .ok_or_else(|| ApiError::NotFound(format!("节点 '{}' 不存在", query.id)))?;
+    let node = map_node_record(node_map)
+        .ok_or_else(|| ApiError::Internal("无法解析节点数据".to_string()))?;
+    Ok(Json(node))
+}
+
+fn parse_edge_types(raw: Option<&str>) -> Option<Vec<String>> {
+    let values: Vec<String> = raw
+        .unwrap_or_default()
+        .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+        .filter_map(|token| {
+            let trimmed = token.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+fn map_node_record(map: HashMap<String, JsonValue>) -> Option<GraphNodeDto> {
+    let id = map.get("id")?.as_str()?.to_string();
+    let entity_type = map
+        .get("label")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Unknown")
+        .to_string();
+    let properties = map.get("properties").cloned().unwrap_or(JsonValue::Null);
+    let title = map.get("title").and_then(|value| value.as_str());
+    let display_name = infer_display_name(&properties, title, &id);
+
+    Some(GraphNodeDto {
+        id,
+        entity_type,
+        display_name,
+        properties,
+    })
+}
+
+fn map_node_summary(map: HashMap<String, JsonValue>) -> Option<GraphNodeSummary> {
+    let node = map_node_record(map)?;
+    Some(GraphNodeSummary {
+        id: node.id.clone(),
+        entity_type: node.entity_type.clone(),
+        display_name: node.display_name.clone(),
+    })
+}
+
+fn map_edge_record(map: HashMap<String, JsonValue>) -> Option<GraphEdgeDto> {
+    let id = map
+        .get("id")
+        .or_else(|| map.get("title"))
+        .and_then(|value| value.as_str())?
+        .to_string();
+    let from = map
+        .get("from_node_id")
+        .or_else(|| map.get("from"))
+        .and_then(|value| value.as_str())?
+        .to_string();
+    let to = map
+        .get("to_node_id")
+        .or_else(|| map.get("to"))
+        .and_then(|value| value.as_str())?
+        .to_string();
+    let label = map
+        .get("label")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("EDGE")
+        .to_string();
+    let properties = map.get("properties").cloned().unwrap_or(JsonValue::Null);
+
+    Some(GraphEdgeDto {
+        id,
+        label,
+        from,
+        to,
+        properties,
+    })
+}
+
+fn infer_display_name(
+    properties: &JsonValue,
+    fallback_title: Option<&str>,
+    fallback_id: &str,
+) -> Option<String> {
+    if let Some(object) = properties.as_object() {
+        for key in [
+            "display_name",
+            "name",
+            "title",
+            "slug",
+            "identifier",
+            "path",
+            "file_path",
+            "repo",
+            "repository",
+            "value",
+        ] {
+            if let Some(value) = object.get(key).and_then(|v| v.as_str()) {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(title) = fallback_title {
+        let trimmed = title.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    let trimmed = fallback_id.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 async fn check_readiness(

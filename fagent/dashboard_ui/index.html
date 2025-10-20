@@ -35,17 +35,30 @@
                 <h2>图可视化</h2>
                 <div class="graph-controls">
                     <label>
-                        节点数 (k)
-                        <input id="graph-limit" type="number" min="10" max="300" value="150" />
+                        起始节点
+                        <select id="graph-start-node"></select>
                     </label>
                     <label>
-                        标签属性
-                        <input id="graph-node-prop" type="text" placeholder="name" />
+                        搜索深度
+                        <input id="graph-depth" type="number" min="0" max="4" value="1" />
+                    </label>
+                    <label>
+                        节点上限
+                        <input id="graph-node-limit" type="number" min="10" max="300" value="150" />
+                    </label>
+                    <label>
+                        边类型过滤
+                        <input
+                            id="graph-edge-types"
+                            type="text"
+                            placeholder="edge_containscontent,edge_uses"
+                        />
                     </label>
                     <button id="refresh-graph">刷新</button>
                 </div>
             </div>
             <div id="graph-container"></div>
+            <div id="graph-legend" class="graph-legend hidden"></div>
             <div id="graph-error" class="error-message"></div>
         </section>
 

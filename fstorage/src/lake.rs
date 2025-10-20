@@ -13,7 +13,7 @@ use deltalake::arrow::array::{
 use deltalake::arrow::datatypes::DataType;
 use deltalake::arrow::record_batch::RecordBatch;
 use deltalake::datafusion::datasource::MemTable;
-use deltalake::datafusion::execution::context::SessionContext;
+use deltalake::datafusion::execution::context::{SessionConfig, SessionContext};
 use deltalake::kernel::Action;
 use deltalake::protocol::SaveMode;
 use deltalake::storage::{ObjectStoreRef, Path as ObjectPath};
@@ -89,6 +89,11 @@ impl Lake {
         Ok(Self { config, engine })
     }
 
+    #[inline]
+    fn single_partition_session() -> SessionContext {
+        SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1))
+    }
+
     // create delta table
     pub async fn get_or_create_table(&self, table_name: &str) -> Result<DeltaTable> {
         let table_path = self.config.lake_path.join(table_name);
@@ -157,7 +162,7 @@ impl Lake {
                         .map(|b| b.schema())
                         .ok_or_else(|| StorageError::InvalidArg("Missing batch schema".into()))?;
 
-                    let ctx = SessionContext::new();
+                    let ctx = Self::single_partition_session();
                     let mem_table = MemTable::try_new(schema.clone(), vec![batches.clone()])
                         .map_err(|e| StorageError::Other(e.into()))?;
                     ctx.register_table("new_data", Arc::new(mem_table))
@@ -512,7 +517,8 @@ impl Lake {
             Err(e) => return Err(StorageError::from(e)),
         };
 
-        let ctx = SessionContext::new();
+        let ctx =
+            SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
         let alias = format!("index_{}", entity_type.replace('-', "_"));
         ctx.register_table(&alias, Arc::new(index_table))
             .map_err(|e| StorageError::Other(e.into()))?;
@@ -571,7 +577,8 @@ impl Lake {
             Err(e) => return Err(StorageError::from(e)),
         };
 
-        let entity_ctx = SessionContext::new();
+        let entity_ctx =
+            SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
         let entity_alias = format!("entity_{}", entity_type.replace('-', "_"));
         entity_ctx
             .register_table(&entity_alias, Arc::new(entity_table))
@@ -902,7 +909,7 @@ impl Lake {
             return Ok(Vec::new());
         };
 
-        let ctx = SessionContext::new();
+        let ctx = Self::single_partition_session();
         let alias = Self::sanitize_table_alias(table_name);
         ctx.register_table(&alias, Arc::new(table))
             .map_err(|e| StorageError::Other(e.into()))?;
@@ -946,7 +953,7 @@ impl Lake {
             return Ok(Vec::new());
         };
 
-        let ctx = SessionContext::new();
+        let ctx = Self::single_partition_session();
         let alias = Self::sanitize_table_alias(table_name);
         ctx.register_table(&alias, Arc::new(table))
             .map_err(|e| StorageError::Other(e.into()))?;
@@ -1074,7 +1081,7 @@ impl Lake {
                 Err(e) => return Err(StorageError::from(e)),
             };
 
-            let ctx = SessionContext::new();
+            let ctx = Self::single_partition_session();
             let alias = format!("edges_{}", et.replace('-', "_"));
             ctx.register_table(&alias, Arc::new(table))
                 .map_err(|e| StorageError::Other(e.into()))?;
@@ -1177,7 +1184,7 @@ impl Lake {
             return Ok(None);
         };
 
-        let ctx = SessionContext::new();
+        let ctx = Self::single_partition_session();
         let alias = Self::sanitize_table_alias(&table_name);
         ctx.register_table(&alias, Arc::new(table))
             .map_err(|e| StorageError::Other(e.into()))?;
@@ -1817,7 +1824,7 @@ mod tests {
         let table_uri = table_path.to_str().unwrap();
         let final_table = deltalake::open_table(table_uri).await.unwrap();
 
-        let ctx = SessionContext::new();
+        let ctx = Lake::single_partition_session();
         ctx.register_table("projects", Arc::new(final_table.clone()))
             .unwrap();
 
