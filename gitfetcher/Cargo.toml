@@ -7,7 +7,7 @@ edition = "2021"
 anyhow = "1.0"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-deltalake = { version = "0.17.0", features = ["datafusion"] }
+deltalake = { version = "0.29.1", features = ["datafusion"] }
 fstorage = { path = "../fstorage" }
 log = "0.4"
 octocrab = { version = "0.45", default-features = false, features = ["rustls", "default-client"] }

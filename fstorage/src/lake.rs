@@ -16,7 +16,10 @@ use deltalake::datafusion::datasource::MemTable;
 use deltalake::datafusion::execution::context::{SessionConfig, SessionContext};
 use deltalake::kernel::Action;
 use deltalake::protocol::SaveMode;
-use deltalake::storage::{ObjectStoreRef, Path as ObjectPath};
+use deltalake::Path;
+use deltalake::operations::DeltaOps;
+use deltalake::datafusion::datasource::TableProvider;
+use url::Url;
 use heed3::RoTxn;
 use helix_db::helix_engine::bm25::bm25::BM25;
 use helix_db::helix_engine::storage_core::HelixGraphStorage;
@@ -33,10 +36,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 async fn read_parquet_batches(
-    object_store: ObjectStoreRef,
+    object_store: Arc<dyn ObjectStore>,
     path: &str,
 ) -> Result<Vec<RecordBatch>> {
-    let object_path = ObjectPath::from(path);
+    let object_path = Path::from(path);
     let meta = object_store.get(&object_path).await?.bytes().await?;
     let reader = deltalake::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
         meta.clone(),
@@ -94,6 +97,25 @@ impl Lake {
         SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1))
     }
 
+    /// Convert a file path to a URL for Delta Lake operations
+    fn path_to_url(&self, path: &std::path::Path) -> Result<Url> {
+        // Use absolute path instead of canonicalize to avoid errors when path doesn't exist yet
+        let absolute_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| StorageError::Io(e))?
+                .join(path)
+        };
+        
+        // Ensure the path and its parent directories exist
+        std::fs::create_dir_all(&absolute_path)
+            .map_err(|e| StorageError::Io(e))?;
+        
+        Url::from_file_path(absolute_path)
+            .map_err(|_| StorageError::Config(format!("Invalid path: {:?}", path)))
+    }
+
     // create delta table
     pub async fn get_or_create_table(&self, table_name: &str) -> Result<DeltaTable> {
         let table_path = self.config.lake_path.join(table_name);
@@ -108,16 +130,14 @@ impl Lake {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let table_uri = table_path
-            .to_str()
-            .ok_or_else(|| StorageError::Config(format!("Invalid table path {:?}", table_path)))?;
+        let table_uri = self.path_to_url(&table_path)?;
 
-        match deltalake::open_table(table_uri).await {
+        match deltalake::open_table(table_uri.clone()).await {
             Ok(table) => Ok(table),
             Err(deltalake::DeltaTableError::NotATable(_)) => {
                 // 如果表尚未初始化，返回一个尚未加载的 DeltaTable 句柄，
                 // 后续写入操作会在第一次写入时创建表并注入 Schema。
-                let table = DeltaTableBuilder::from_uri(table_uri).build()?;
+                let table = DeltaTableBuilder::from_uri(table_uri.clone())?.build()?;
                 Ok(table)
             }
             Err(e) => Err(StorageError::from(e)),
@@ -136,9 +156,7 @@ impl Lake {
         }
 
         let table_path = self.config.lake_path.join(table_name);
-        let table_uri = table_path
-            .to_str()
-            .ok_or_else(|| StorageError::Config(format!("Invalid table path {:?}", table_path)))?;
+        let table_uri = self.path_to_url(&table_path)?;
         let delta_log_path = table_path.join("_delta_log");
         let table_exists = tokio::fs::metadata(&delta_log_path).await.is_ok();
 
@@ -265,13 +283,11 @@ impl Lake {
         start_version: i64,
     ) -> Result<(Vec<(i64, Vec<RecordBatch>)>, i64)> {
         let table_path = self.config.lake_path.join(table_name);
-        let table_uri = table_path
-            .to_str()
-            .ok_or_else(|| StorageError::Config(format!("Invalid table path {:?}", table_path)))?;
+        let table_uri = self.path_to_url(&table_path)?;
 
-        let mut table = DeltaTableBuilder::from_uri(table_uri).build()?;
+        let mut table = DeltaTableBuilder::from_uri(table_uri)?.build()?;
         table.load().await?;
-        let latest_version = table.version();
+        let latest_version = table.version().unwrap_or(-1);
 
         if latest_version <= start_version {
             return Ok((Vec::new(), latest_version));
@@ -506,9 +522,9 @@ impl Lake {
             return Ok(None);
         }
 
-        let table_uri = match index_path.to_str() {
-            Some(uri) => uri,
-            None => return Ok(None),
+        let table_uri = match self.path_to_url(&index_path) {
+            Ok(uri) => uri,
+            Err(_) => return Ok(None),
         };
 
         let index_table = match deltalake::open_table(table_uri).await {
@@ -567,9 +583,9 @@ impl Lake {
             return Ok(None);
         }
 
-        let entity_uri = match entity_path.to_str() {
-            Some(uri) => uri,
-            None => return Ok(None),
+        let entity_uri = match self.path_to_url(&entity_path) {
+            Ok(uri) => uri,
+            Err(_) => return Ok(None),
         };
         let entity_table = match deltalake::open_table(entity_uri).await {
             Ok(table) => table,
@@ -1070,9 +1086,9 @@ impl Lake {
                 continue;
             }
 
-            let table_uri = match table_path.to_str() {
-                Some(uri) => uri,
-                None => continue,
+            let table_uri = match self.path_to_url(&table_path) {
+                Ok(uri) => uri,
+                Err(_) => continue,
             };
 
             let table = match deltalake::open_table(table_uri).await {
@@ -1161,9 +1177,9 @@ impl Lake {
         if tokio::fs::metadata(&table_path).await.is_err() {
             return Ok(None);
         }
-        let table_uri = match table_path.to_str() {
-            Some(uri) => uri,
-            None => return Ok(None),
+        let table_uri = match self.path_to_url(&table_path) {
+            Ok(uri) => uri,
+            Err(_) => return Ok(None),
         };
 
         match deltalake::open_table(table_uri).await {
@@ -1368,13 +1384,12 @@ impl Lake {
 
         for et in edge_types {
             let table_path = format!("silver/edges/{}", et);
-            if let Ok(table) =
-                deltalake::open_table(self.config.lake_path.join(&table_path).to_str().unwrap())
-                    .await
-            {
-                // 使用表的版本数量估算记录数（简化实现）
-                let file_count = table.version() as i64;
-                stats.insert(et, file_count);
+            if let Ok(table_uri) = self.path_to_url(&self.config.lake_path.join(&table_path)) {
+                if let Ok(table) = deltalake::open_table(table_uri).await {
+                    // 使用表的版本数量估算记录数（简化实现）
+                    let file_count = table.version().map_or(0, |v| v as i64);
+                    stats.insert(et, file_count);
+                }
             }
         }
 
@@ -1421,11 +1436,11 @@ impl Lake {
         while let Some(current) = stack.pop() {
             let delta_log = current.join("_delta_log");
             if tokio::fs::metadata(&delta_log).await.is_ok() {
-                if let Some(uri) = current.to_str() {
-                    match deltalake::open_table(uri).await {
+                if let Ok(uri) = self.path_to_url(&current) {
+                    match deltalake::open_table(uri.clone()).await {
                         Ok(table) => {
-                            if let Some(schema) = table.schema() {
-                                let mut columns: Vec<ColumnSummary> = schema
+                            let schema = table.schema();
+                            let mut columns: Vec<ColumnSummary> = schema
                                     .fields()
                                     .iter()
                                     .map(|field| ColumnSummary {
@@ -1444,14 +1459,12 @@ impl Lake {
                                     table_path: relative,
                                     columns,
                                 });
-                            }
                         }
                         Err(err) => {
                             log::warn!("Failed to open table at '{}': {}", uri, err);
                         }
                     }
                 }
-                continue;
             }
 
             let mut entries = match tokio::fs::read_dir(&current).await {
@@ -1761,10 +1774,11 @@ mod tests {
         assert!(result.is_ok());
 
         // 验证表是否存在
-        let table = deltalake::open_table(config.lake_path.join(table_name).to_str().unwrap())
+        let table_uri = Url::from_file_path(config.lake_path.join(table_name)).unwrap();
+        let table = deltalake::open_table(table_uri)
             .await
             .unwrap();
-        assert_eq!(table.version(), 0);
+        assert_eq!(table.version(), Some(0));
         assert_eq!(table.get_file_uris().into_iter().count(), 1);
     }
 
@@ -1821,7 +1835,7 @@ mod tests {
             table_path.join("_delta_log").exists(),
             "Delta log directory should be created"
         );
-        let table_uri = table_path.to_str().unwrap();
+        let table_uri = lake.path_to_url(&table_path).unwrap();
         let final_table = deltalake::open_table(table_uri).await.unwrap();
 
         let ctx = Lake::single_partition_session();

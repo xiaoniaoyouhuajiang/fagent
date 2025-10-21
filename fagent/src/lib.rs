@@ -517,9 +517,8 @@ async fn graph_subgraph(
         .get_node_by_id(&query.start_id, None)
         .await
         .map_err(ApiError::from_storage)?;
-    let center_map = center_map.ok_or_else(|| {
-        ApiError::NotFound(format!("未找到起始节点 '{}'", query.start_id))
-    })?;
+    let center_map = center_map
+        .ok_or_else(|| ApiError::NotFound(format!("未找到起始节点 '{}'", query.start_id)))?;
     let center_node = map_node_record(center_map)
         .ok_or_else(|| ApiError::Internal("无法解析起始节点".to_string()))?;
 
@@ -555,8 +554,8 @@ async fn graph_node_detail(
         .get_node_by_id(&query.id, None)
         .await
         .map_err(ApiError::from_storage)?;
-    let node_map = fetched
-        .ok_or_else(|| ApiError::NotFound(format!("节点 '{}' 不存在", query.id)))?;
+    let node_map =
+        fetched.ok_or_else(|| ApiError::NotFound(format!("节点 '{}' 不存在", query.id)))?;
     let node = map_node_record(node_map)
         .ok_or_else(|| ApiError::Internal("无法解析节点数据".to_string()))?;
     Ok(Json(node))

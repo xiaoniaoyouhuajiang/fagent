@@ -1,4 +1,5 @@
 use deltalake::open_table;
+use url::Url;
 use fstorage::{
     fetch::Fetchable,
     schemas::generated_schemas::{Commit, Developer, Issue, Project, Version},
@@ -110,18 +111,17 @@ async fn writes_entities_into_expected_delta_tables() -> anyhow::Result<()> {
             table_path
         );
 
-        let uri = table_path
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("non-UTF8 table path"))?;
-        let table = open_table(uri).await?;
+        let url = Url::from_file_path(&table_path)
+            .map_err(|_| anyhow::anyhow!("non-UTF8 table path"))?;
+        let table = open_table(url).await?;
         assert_eq!(
             table.version(),
-            0,
+            Some(0),
             "table {} should have exactly one commit",
             label
         );
         assert!(
-            table.get_file_uris().into_iter().count() > 0,
+            table.get_file_uris()?.count() > 0,
             "table {} should contain data files",
             label
         );

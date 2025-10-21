@@ -20,7 +20,7 @@ reqwest = { version = "0.12.5", features = ["json", "rustls-tls"] }
 helix-db = { git = "https://github.com/HelixDB/helix-db", features = ["full"] }
 # helix-db = { path = "../deps/helix-db", features = ["full"] }
 chrono = { version = "0.4.39", features = ["serde"] }
-deltalake = { version = "0.17.0", features = ["datafusion"] }
+deltalake = { version = "0.29.1", features = ["datafusion"] }
 uuid = { version = "1.18.1", features = ["v4", "serde", "v5"] }
 bincode = "1.3.3"
 heed3 = "0.22.0"

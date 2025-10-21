@@ -9,6 +9,7 @@ use helix_db::{
 };
 use std::sync::Arc;
 use uuid::Uuid;
+use url::Url;
 
 mod common;
 
@@ -28,16 +29,12 @@ async fn graph_pipeline_updates_delta_and_helix() -> anyhow::Result<()> {
 
     ctx.synchronizer.process_graph_data(graph_data).await?;
 
-    let table_uri = ctx
-        .config
-        .lake_path
-        .join(Project::table_name())
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("non-UTF8 table path"))?
-        .to_string();
-    let table = open_table(table_uri).await?;
-    assert_eq!(table.version(), 0);
-    assert_eq!(table.get_file_uris().into_iter().count(), 1);
+    let table_path = ctx.config.lake_path.join(Project::table_name());
+    let table_url = Url::from_file_path(&table_path)
+        .map_err(|_| anyhow::anyhow!("non-UTF8 table path"))?;
+    let table = open_table(table_url).await?;
+    assert_eq!(table.version(), Some(0));
+    assert_eq!(table.get_file_uris()?.count(), 1);
 
     let node_id = utils::id::stable_node_id_u128(
         Project::ENTITY_TYPE,
@@ -67,12 +64,10 @@ async fn graph_pipeline_updates_delta_and_helix() -> anyhow::Result<()> {
         index_table_path.exists(),
         "index table directory should exist"
     );
-    let index_uri = index_table_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("non-UTF8 index path"))?
-        .to_string();
-    let index_table = open_table(index_uri).await?;
-    assert_eq!(index_table.version(), 0);
+    let index_url = Url::from_file_path(&index_table_path)
+        .map_err(|_| anyhow::anyhow!("non-UTF8 index path"))?;
+    let index_table = open_table(index_url).await?;
+    assert_eq!(index_table.version(), Some(0));
 
     let ctx_df = SessionContext::new();
     ctx_df.register_table("index_table", Arc::new(index_table))?;

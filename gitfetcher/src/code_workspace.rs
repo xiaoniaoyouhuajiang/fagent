@@ -171,9 +171,7 @@ fn checkout_revision(repo: &Repository, revision: &str) -> Result<(), StorageErr
             })?;
             let mut fetch_options = FetchOptions::new();
             fetch_options.download_tags(git2::AutotagOption::All);
-            if let Some(proxy_options) =
-                proxy_options_from_env(remote.url().unwrap_or_default())
-            {
+            if let Some(proxy_options) = proxy_options_from_env(remote.url().unwrap_or_default()) {
                 fetch_options.proxy_options(proxy_options);
             }
             remote

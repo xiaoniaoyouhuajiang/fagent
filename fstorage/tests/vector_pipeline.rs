@@ -1,5 +1,6 @@
 use chrono::Utc;
 use deltalake::open_table;
+use url::Url;
 use fstorage::{
     fetch::{EntityCategory, Fetchable},
     schemas::generated_schemas::{Project, ReadmeChunk},
@@ -58,20 +59,16 @@ async fn vector_pipeline_persists_to_lake_and_engine() -> anyhow::Result<()> {
     ctx.synchronizer.process_graph_data(graph_data).await?;
 
     let project_table = ctx.config.lake_path.join(Project::table_name());
-    let project_table_uri = project_table
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("non-UTF8 project table path"))?
-        .to_string();
-    let project_delta = open_table(project_table_uri).await?;
-    assert_eq!(project_delta.version(), 0);
+    let project_table_url = Url::from_file_path(&project_table)
+        .map_err(|_| anyhow::anyhow!("non-UTF8 project table path"))?;
+    let project_delta = open_table(project_table_url).await?;
+    assert_eq!(project_delta.version(), Some(0));
 
     let vector_table = ctx.config.lake_path.join(ReadmeChunk::table_name());
-    let vector_table_uri = vector_table
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("non-UTF8 vector table path"))?
-        .to_string();
-    let vector_delta = open_table(vector_table_uri).await?;
-    assert_eq!(vector_delta.version(), 0);
+    let vector_table_url = Url::from_file_path(&vector_table)
+        .map_err(|_| anyhow::anyhow!("non-UTF8 vector table path"))?;
+    let vector_delta = open_table(vector_table_url).await?;
+    assert_eq!(vector_delta.version(), Some(0));
 
     let offsets = ctx.catalog.list_ingestion_offsets()?;
     let vector_offset = offsets
