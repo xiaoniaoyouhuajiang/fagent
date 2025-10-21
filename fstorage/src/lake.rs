@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use deltalake::DeltaTable;
 use deltalake::DeltaTableBuilder;
 use deltalake::ObjectStore;
+use deltalake::Path;
 use deltalake::arrow::array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
     TimestampMicrosecondArray, UInt32Array, UInt64Array,
@@ -13,13 +14,11 @@ use deltalake::arrow::array::{
 use deltalake::arrow::datatypes::DataType;
 use deltalake::arrow::record_batch::RecordBatch;
 use deltalake::datafusion::datasource::MemTable;
+use deltalake::datafusion::datasource::TableProvider;
 use deltalake::datafusion::execution::context::{SessionConfig, SessionContext};
 use deltalake::kernel::Action;
-use deltalake::protocol::SaveMode;
-use deltalake::Path;
 use deltalake::operations::DeltaOps;
-use deltalake::datafusion::datasource::TableProvider;
-use url::Url;
+use deltalake::protocol::SaveMode;
 use heed3::RoTxn;
 use helix_db::helix_engine::bm25::bm25::BM25;
 use helix_db::helix_engine::storage_core::HelixGraphStorage;
@@ -33,6 +32,7 @@ use helix_db::utils::items::{Edge, Node};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use url::Url;
 use uuid::Uuid;
 
 async fn read_parquet_batches(
@@ -107,11 +107,10 @@ impl Lake {
                 .map_err(|e| StorageError::Io(e))?
                 .join(path)
         };
-        
+
         // Ensure the path and its parent directories exist
-        std::fs::create_dir_all(&absolute_path)
-            .map_err(|e| StorageError::Io(e))?;
-        
+        std::fs::create_dir_all(&absolute_path).map_err(|e| StorageError::Io(e))?;
+
         Url::from_file_path(absolute_path)
             .map_err(|_| StorageError::Config(format!("Invalid path: {:?}", path)))
     }
@@ -533,8 +532,7 @@ impl Lake {
             Err(e) => return Err(StorageError::from(e)),
         };
 
-        let ctx =
-            SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
+        let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
         let alias = format!("index_{}", entity_type.replace('-', "_"));
         ctx.register_table(&alias, Arc::new(index_table))
             .map_err(|e| StorageError::Other(e.into()))?;
@@ -1441,24 +1439,24 @@ impl Lake {
                         Ok(table) => {
                             let schema = table.schema();
                             let mut columns: Vec<ColumnSummary> = schema
-                                    .fields()
-                                    .iter()
-                                    .map(|field| ColumnSummary {
-                                        name: field.name().to_string(),
-                                        data_type: field.data_type().to_string(),
-                                        nullable: field.is_nullable(),
-                                    })
-                                    .collect();
-                                columns.sort_by(|a, b| a.name.cmp(&b.name));
-                                let relative = current
-                                    .strip_prefix(&self.config.lake_path)
-                                    .unwrap_or(&current)
-                                    .to_string_lossy()
-                                    .to_string();
-                                tables.push(TableSummary {
-                                    table_path: relative,
-                                    columns,
-                                });
+                                .fields()
+                                .iter()
+                                .map(|field| ColumnSummary {
+                                    name: field.name().to_string(),
+                                    data_type: field.data_type().to_string(),
+                                    nullable: field.is_nullable(),
+                                })
+                                .collect();
+                            columns.sort_by(|a, b| a.name.cmp(&b.name));
+                            let relative = current
+                                .strip_prefix(&self.config.lake_path)
+                                .unwrap_or(&current)
+                                .to_string_lossy()
+                                .to_string();
+                            tables.push(TableSummary {
+                                table_path: relative,
+                                columns,
+                            });
                         }
                         Err(err) => {
                             log::warn!("Failed to open table at '{}': {}", uri, err);
@@ -1775,9 +1773,7 @@ mod tests {
 
         // 验证表是否存在
         let table_uri = Url::from_file_path(config.lake_path.join(table_name)).unwrap();
-        let table = deltalake::open_table(table_uri)
-            .await
-            .unwrap();
+        let table = deltalake::open_table(table_uri).await.unwrap();
         assert_eq!(table.version(), Some(0));
         assert_eq!(table.get_file_uris().into_iter().count(), 1);
     }

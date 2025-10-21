@@ -1,6 +1,5 @@
 use chrono::Utc;
 use deltalake::open_table;
-use url::Url;
 use fstorage::{
     fetch::{EntityCategory, Fetchable},
     schemas::generated_schemas::{Project, ReadmeChunk},
@@ -16,6 +15,7 @@ use helix_db::{
         vector_core::vector::HVector,
     },
 };
+use url::Url;
 
 mod common;
 

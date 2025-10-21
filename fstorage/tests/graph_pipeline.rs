@@ -8,8 +8,8 @@ use helix_db::{
     helix_engine::storage_core::storage_methods::StorageMethods, protocol::value::Value,
 };
 use std::sync::Arc;
-use uuid::Uuid;
 use url::Url;
+use uuid::Uuid;
 
 mod common;
 
@@ -30,8 +30,8 @@ async fn graph_pipeline_updates_delta_and_helix() -> anyhow::Result<()> {
     ctx.synchronizer.process_graph_data(graph_data).await?;
 
     let table_path = ctx.config.lake_path.join(Project::table_name());
-    let table_url = Url::from_file_path(&table_path)
-        .map_err(|_| anyhow::anyhow!("non-UTF8 table path"))?;
+    let table_url =
+        Url::from_file_path(&table_path).map_err(|_| anyhow::anyhow!("non-UTF8 table path"))?;
     let table = open_table(table_url).await?;
     assert_eq!(table.version(), Some(0));
     assert_eq!(table.get_file_uris()?.count(), 1);

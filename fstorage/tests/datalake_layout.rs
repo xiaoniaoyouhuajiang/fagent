@@ -1,9 +1,9 @@
 use deltalake::open_table;
-use url::Url;
 use fstorage::{
     fetch::Fetchable,
     schemas::generated_schemas::{Commit, Developer, Issue, Project, Version},
 };
+use url::Url;
 
 mod common;
 
@@ -111,8 +111,8 @@ async fn writes_entities_into_expected_delta_tables() -> anyhow::Result<()> {
             table_path
         );
 
-        let url = Url::from_file_path(&table_path)
-            .map_err(|_| anyhow::anyhow!("non-UTF8 table path"))?;
+        let url =
+            Url::from_file_path(&table_path).map_err(|_| anyhow::anyhow!("non-UTF8 table path"))?;
         let table = open_table(url).await?;
         assert_eq!(
             table.version(),

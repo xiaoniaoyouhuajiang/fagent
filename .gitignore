@@ -7,6 +7,10 @@
 **/*.pest
 **/*.txt
 **/.fastembed_cache/
+
+# debug path
 /temp
+/captures
+
 /references
 /deps
