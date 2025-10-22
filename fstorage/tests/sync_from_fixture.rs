@@ -1,5 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
+use anyhow::Context;
+use deltalake::datafusion::{datasource::TableProvider, execution::context::SessionContext};
 use deltalake::open_table;
 use fstorage::{
     fetch::{Fetchable, Fetcher},
@@ -7,11 +9,9 @@ use fstorage::{
     schemas::generated_schemas::{Commit, Project, ReadmeChunk, Version},
     sync::DataSynchronizer,
 };
-use serde_json::{json, Value};
-use url::Url;
-use anyhow::Context;
-use deltalake::datafusion::{datasource::TableProvider, execution::context::SessionContext};
 use helix_db::helix_engine::storage_core::graph_visualization::GraphVisualization;
+use serde_json::{Value, json};
+use url::Url;
 
 mod common;
 mod support;
@@ -22,8 +22,8 @@ use support::fixture::FixtureFetcher;
 #[tokio::test]
 async fn sync_from_fixture_populates_hot_and_cold_layers() -> anyhow::Result<()> {
     let ctx = common::init_test_context().await?;
-    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/gitfetcher/tinykv");
+    let fixture_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gitfetcher/tinykv");
 
     let fixture_fetcher = Arc::new(FixtureFetcher::new());
     fixture_fetcher
@@ -65,7 +65,9 @@ async fn sync_from_fixture_populates_hot_and_cold_layers() -> anyhow::Result<()>
     ];
     for table in &expect_tables {
         assert!(
-            offsets.iter().any(|offset| offset.table_path.ends_with(table)),
+            offsets
+                .iter()
+                .any(|offset| offset.table_path.ends_with(table)),
             "expected offset for table {table}"
         );
     }
@@ -73,7 +75,10 @@ async fn sync_from_fixture_populates_hot_and_cold_layers() -> anyhow::Result<()>
     let project_table = Url::from_file_path(ctx.config.lake_path.join(Project::table_name()))
         .map_err(|_| anyhow::anyhow!("project table path not valid UTF-8"))?;
     let project_delta = open_table(project_table).await?;
-    assert!(project_delta.version().is_some(), "project table initialized");
+    assert!(
+        project_delta.version().is_some(),
+        "project table initialized"
+    );
 
     let vector_table = Url::from_file_path(ctx.config.lake_path.join(ReadmeChunk::table_name()))
         .map_err(|_| anyhow::anyhow!("vector table path not valid UTF-8"))?;
@@ -114,10 +119,9 @@ async fn sync_from_fixture_populates_hot_and_cold_layers() -> anyhow::Result<()>
     let commit_rows = delta_row_count(ctx.config.lake_path.join(Commit::table_name()))
         .await
         .context("count commit rows")?;
-    let has_version_rows =
-        delta_row_count(ctx.config.lake_path.join("silver/edges/hasversion"))
-            .await
-            .context("count hasversion rows")?;
+    let has_version_rows = delta_row_count(ctx.config.lake_path.join("silver/edges/hasversion"))
+        .await
+        .context("count hasversion rows")?;
     let is_commit_rows = delta_row_count(ctx.config.lake_path.join("silver/edges/iscommit"))
         .await
         .context("count iscommit rows")?;
@@ -155,8 +159,8 @@ async fn sync_from_fixture_populates_hot_and_cold_layers() -> anyhow::Result<()>
 }
 
 async fn delta_row_count(path: PathBuf) -> anyhow::Result<usize> {
-    let url = Url::from_file_path(&path)
-        .map_err(|_| anyhow::anyhow!("non-UTF8 path {:?}", path))?;
+    let url =
+        Url::from_file_path(&path).map_err(|_| anyhow::anyhow!("non-UTF8 path {:?}", path))?;
     let table = open_table(url).await?;
     let ctx = SessionContext::new();
     let table_provider: Arc<dyn TableProvider> = Arc::new(table);

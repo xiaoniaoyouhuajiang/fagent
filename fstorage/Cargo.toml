@@ -27,6 +27,8 @@ heed3 = "0.22.0"
 dotenvy = "0.15.7"
 rustworkx-core = "0.17.1"
 fastembed = "5.2.0"
+clap = { version = "4.5.21", features = ["derive"] }
+base64 = "0.22.1"
 
 [build-dependencies]
 helix-db = { git = "https://github.com/HelixDB/helix-db", features = ["full"] }

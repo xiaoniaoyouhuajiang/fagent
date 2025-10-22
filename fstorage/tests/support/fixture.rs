@@ -7,12 +7,9 @@
 
 use std::{collections::HashMap, fs::File, path::Path, sync::Arc};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use deltalake::arrow::{
-    ipc::reader::FileReader,
-    record_batch::RecordBatch,
-};
+use deltalake::arrow::{ipc::reader::FileReader, record_batch::RecordBatch};
 use fstorage::{
     embedding::EmbeddingProvider,
     errors::{Result as StorageResult, StorageError},
@@ -242,9 +239,7 @@ fn entity_spec(name: &str, category: EntityCategory) -> Result<EntitySpec> {
 }
 
 fn trim_edge_prefix(name: &str) -> String {
-    name.strip_prefix("edge_")
-        .unwrap_or(name)
-        .to_lowercase()
+    name.strip_prefix("edge_").unwrap_or(name).to_lowercase()
 }
 
 struct FixtureBatch {
