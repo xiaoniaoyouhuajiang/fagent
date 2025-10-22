@@ -1,14 +1,14 @@
 use std::{
-    fs::{File, create_dir_all},
+    fs::{create_dir_all, File},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use anyhow::{Context, Result};
+use arrow_json::ArrayWriter;
 use chrono::Utc;
 use clap::Parser;
-use arrow_json::ArrayWriter;
 use deltalake::arrow::ipc::writer::FileWriter;
 use fstorage::{
     embedding::NullEmbeddingProvider,

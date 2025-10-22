@@ -865,20 +865,28 @@ impl DataSynchronizer for FStorageSynchronizer {
                 if let Some(index_batch) =
                     Self::build_node_index_batch(entity_type, &record_batch, &merge_keys)?
                 {
-                    let index_table_name = format!("silver/index/{}", entity_type);
-                    self.lake
-                        .write_batches(
+                    if merge_keys.is_empty() {
+                        log::debug!(
+                            "Skipping index write for '{}' because no primary keys are defined",
+                            entity_type
+                        );
+                    } else {
+                        let index_table_name = format!("silver/index/{}", entity_type);
+                        let index_merge_keys = merge_keys.clone();
+                        self.lake
+                            .write_batches(
+                                &index_table_name,
+                                vec![index_batch],
+                                Some(index_merge_keys.clone()),
+                            )
+                            .await?;
+                        self.catalog.ensure_ingestion_offset(
                             &index_table_name,
-                            vec![index_batch],
-                            Some(vec!["id".to_string()]),
-                        )
-                        .await?;
-                    self.catalog.ensure_ingestion_offset(
-                        &index_table_name,
-                        entity_type,
-                        category,
-                        &vec!["id".to_string()],
-                    )?;
+                            entity_type,
+                            category,
+                            &index_merge_keys,
+                        )?;
+                    }
                 }
             }
 

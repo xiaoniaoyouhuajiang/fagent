@@ -2,7 +2,7 @@ use chrono::Utc;
 use fstorage::{
     fetch::{Fetchable, GraphData},
     lake::{NeighborDirection, NeighborEdgeOrientation},
-    schemas::generated_schemas::{Calls, Function},
+    schemas::generated_schemas::{Calls, Function, Project, ReadmeChunk},
     sync::DataSynchronizer,
     utils,
 };
@@ -89,6 +89,37 @@ async fn query_api_covers_hot_and_cold_paths() -> anyhow::Result<()> {
         },
     ]);
     ctx.synchronizer.process_graph_data(node_data).await?;
+
+    let project_url = "https://example.com/repo";
+    let project = Project {
+        url: Some(project_url.to_string()),
+        name: Some("example".to_string()),
+        description: Some("Example project".to_string()),
+        language: Some("Rust".to_string()),
+        stars: Some(1),
+        forks: Some(0),
+    };
+    let readme_chunk = ReadmeChunk {
+        id: None,
+        project_url: Some(project_url.to_string()),
+        revision_sha: Some("rev-1".to_string()),
+        source_file: Some("README.md".to_string()),
+        start_line: Some(1),
+        end_line: Some(5),
+        text: Some("# Example".to_string()),
+        embedding: Some(vec![0.1, 0.2, 0.3]),
+        embedding_model: Some("fixture-model".to_string()),
+        embedding_id: Some("chunk-1".to_string()),
+        token_count: Some(3),
+        chunk_order: Some(0),
+        created_at: Some(Utc::now()),
+        updated_at: None,
+    };
+
+    let mut vector_graph = GraphData::new();
+    vector_graph.add_entities(vec![project]);
+    vector_graph.add_entities(vec![readme_chunk]);
+    ctx.synchronizer.process_graph_data(vector_graph).await?;
 
     let edge_ab_id = utils::id::stable_edge_id_u128(
         Calls::ENTITY_TYPE,
@@ -229,6 +260,35 @@ async fn query_api_covers_hot_and_cold_paths() -> anyhow::Result<()> {
     assert!(
         constrained.edges.len() <= 1,
         "edge limit should constrain BFS result"
+    );
+
+    let project_id =
+        utils::id::stable_node_id_u128(Project::ENTITY_TYPE, &[("url", project_url.to_string())]);
+    let project_uuid = Uuid::from_u128(project_id).to_string();
+
+    let project_neighbors = ctx
+        .lake
+        .neighbors(&project_uuid, None, NeighborDirection::Outgoing, 10)
+        .await?;
+    assert!(
+        project_neighbors.iter().any(|record| {
+            record
+                .node
+                .as_ref()
+                .and_then(|node| node.get("label"))
+                .and_then(|value| value.as_str())
+                == Some(ReadmeChunk::ENTITY_TYPE)
+        }),
+        "project neighbors should surface vector node"
+    );
+
+    let project_subgraph = ctx.lake.subgraph_bfs(&project_uuid, None, 1, 0, 0).await?;
+    let has_vector_node = project_subgraph.nodes.iter().any(|node| {
+        node.get("label").and_then(|value| value.as_str()) == Some(ReadmeChunk::ENTITY_TYPE)
+    });
+    assert!(
+        has_vector_node,
+        "subgraph should include readme chunk as virtual node"
     );
 
     let table_name = Function::table_name();

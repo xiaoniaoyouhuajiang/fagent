@@ -3,10 +3,6 @@ use crate::errors::{Result, StorageError};
 use crate::models::{ColumnSummary, HybridSearchHit, TableSummary, TextSearchHit, VectorSearchHit};
 use crate::utils;
 use chrono::{DateTime, Utc};
-use deltalake::DeltaTable;
-use deltalake::DeltaTableBuilder;
-use deltalake::ObjectStore;
-use deltalake::Path;
 use deltalake::arrow::array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
     TimestampMicrosecondArray, UInt32Array, UInt64Array,
@@ -19,10 +15,14 @@ use deltalake::datafusion::execution::context::{SessionConfig, SessionContext};
 use deltalake::kernel::Action;
 use deltalake::operations::DeltaOps;
 use deltalake::protocol::SaveMode;
+use deltalake::DeltaTable;
+use deltalake::DeltaTableBuilder;
+use deltalake::ObjectStore;
+use deltalake::Path;
 use heed3::RoTxn;
 use helix_db::helix_engine::bm25::bm25::BM25;
-use helix_db::helix_engine::storage_core::HelixGraphStorage;
 use helix_db::helix_engine::storage_core::storage_methods::StorageMethods;
+use helix_db::helix_engine::storage_core::HelixGraphStorage;
 use helix_db::helix_engine::traversal_core::HelixGraphEngine;
 use helix_db::helix_engine::types::{GraphError, VectorError};
 use helix_db::helix_engine::vector_core::hnsw::HNSW;
@@ -161,7 +161,7 @@ impl Lake {
 
         if !table_exists {
             let table_display_name = table_name.replace('/', "_");
-            deltalake::DeltaOps::try_from_uri(table_uri)
+            DeltaOps::try_from_uri(table_uri)
                 .await?
                 .write(batches.clone())
                 .with_save_mode(SaveMode::Overwrite)
@@ -208,7 +208,7 @@ impl Lake {
                         .await
                         .map_err(|e| StorageError::Other(e.into()))?;
 
-                    deltalake::DeltaOps(existing_table)
+                    DeltaOps(existing_table)
                         .write(final_batches)
                         .with_save_mode(SaveMode::Overwrite)
                         .await?;
@@ -221,7 +221,7 @@ impl Lake {
             }
         }
 
-        deltalake::DeltaOps::try_from_uri(table_uri)
+        DeltaOps::try_from_uri(table_uri)
             .await?
             .write(batches)
             .await?;
@@ -446,6 +446,32 @@ impl Lake {
         result
     }
 
+    fn vector_to_node_map(vector: &HVector) -> HashMap<String, JsonValue> {
+        let mut result = HashMap::new();
+        result.insert(
+            "id".to_string(),
+            JsonValue::String(Uuid::from_u128(vector.id).to_string()),
+        );
+
+        let label = vector
+            .get_label()
+            .map(|value| value.inner_stringify())
+            .unwrap_or_else(|| "VECTOR".to_string());
+        result.insert("label".to_string(), JsonValue::String(label));
+
+        if let Some(props) = vector.properties.clone() {
+            let mut json_map = JsonMap::new();
+            for (key, value) in props {
+                json_map.insert(key, Self::helix_value_to_json(&value));
+            }
+            result.insert("properties".to_string(), JsonValue::Object(json_map));
+        } else {
+            result.insert("properties".to_string(), JsonValue::Null);
+        }
+
+        result
+    }
+
     fn record_batch_row_to_map(
         batch: &RecordBatch,
         row: usize,
@@ -648,6 +674,17 @@ impl Lake {
             if let Ok(node) = self.engine.storage.get_node(&txn, &node_key) {
                 return Ok(Some(Self::node_to_map(node)));
             }
+
+            match self
+                .engine
+                .storage
+                .vectors
+                .get_vector(&txn, node_key, 0, true)
+            {
+                Ok(vector) => return Ok(Some(Self::vector_to_node_map(&vector))),
+                Err(VectorError::VectorNotFound(_)) | Err(VectorError::EntryPointNotFound) => {}
+                Err(err) => return Err(StorageError::Graph(err.into())),
+            }
         }
 
         let candidate_types = if let Some(hint) = entity_type_hint {
@@ -823,6 +860,8 @@ impl Lake {
 
         let mut visited_nodes: HashSet<u128> = HashSet::new();
         let mut seen_edges: HashSet<u128> = HashSet::new();
+        let mut known_vector_nodes: HashSet<u128> = HashSet::new();
+        let mut missing_vector_nodes: HashSet<u128> = HashSet::new();
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
 
@@ -840,18 +879,37 @@ impl Lake {
                 continue;
             }
 
-            let node = match self.engine.storage.get_node(&txn, &node_key) {
-                Ok(node) => node,
+            let node_map = match self.engine.storage.get_node(&txn, &node_key) {
+                Ok(node) => Self::node_to_map(node),
                 Err(GraphError::NodeNotFound) => {
-                    return Err(StorageError::NotFound(format!(
-                        "Node '{}' was not found in Helix storage",
-                        Uuid::from_u128(node_key)
-                    )));
+                    if missing_vector_nodes.contains(&node_key) {
+                        visited_nodes.insert(node_key);
+                        continue;
+                    }
+
+                    match self
+                        .engine
+                        .storage
+                        .vectors
+                        .get_vector(&txn, node_key, 0, true)
+                    {
+                        Ok(vector) => {
+                            known_vector_nodes.insert(node_key);
+                            Self::vector_to_node_map(&vector)
+                        }
+                        Err(VectorError::VectorNotFound(_))
+                        | Err(VectorError::EntryPointNotFound) => {
+                            missing_vector_nodes.insert(node_key);
+                            visited_nodes.insert(node_key);
+                            continue;
+                        }
+                        Err(err) => return Err(StorageError::Graph(err.into())),
+                    }
                 }
                 Err(other) => return Err(StorageError::from(other)),
             };
 
-            nodes.push(Self::node_to_map(node));
+            nodes.push(node_map);
             visited_nodes.insert(node_key);
 
             if node_cap != usize::MAX && nodes.len() >= node_cap {
@@ -891,6 +949,42 @@ impl Lake {
                     if !allowed.contains(&edge.label) {
                         continue;
                     }
+                }
+
+                let neighbor_exists = if visited_nodes.contains(&next_node_id)
+                    || known_vector_nodes.contains(&next_node_id)
+                {
+                    true
+                } else if missing_vector_nodes.contains(&next_node_id) {
+                    false
+                } else {
+                    match self.engine.storage.get_node(&txn, &next_node_id) {
+                        Ok(_) => true,
+                        Err(GraphError::NodeNotFound) => {
+                            match self.engine.storage.vectors.get_vector(
+                                &txn,
+                                next_node_id,
+                                0,
+                                true,
+                            ) {
+                                Ok(_) => {
+                                    known_vector_nodes.insert(next_node_id);
+                                    true
+                                }
+                                Err(VectorError::VectorNotFound(_))
+                                | Err(VectorError::EntryPointNotFound) => {
+                                    missing_vector_nodes.insert(next_node_id);
+                                    false
+                                }
+                                Err(err) => return Err(StorageError::Graph(err.into())),
+                            }
+                        }
+                        Err(err) => return Err(StorageError::from(err)),
+                    }
+                };
+
+                if !neighbor_exists {
+                    continue;
                 }
 
                 edges.push(Self::edge_to_map(edge));
@@ -1022,16 +1116,27 @@ impl Lake {
         let label_filter = edge_type.map(str::to_string);
         let txn = self.engine.storage.graph_env.read_txn()?;
 
-        self.engine
-            .storage
-            .get_node(&txn, &node_key)
-            .map_err(|err| match err {
-                GraphError::NodeNotFound => StorageError::NotFound(format!(
-                    "Node '{}' was not found in Helix storage",
-                    Uuid::from_u128(node_key)
-                )),
-                other => StorageError::from(other),
-            })?;
+        match self.engine.storage.get_node(&txn, &node_key) {
+            Ok(_) => {}
+            Err(GraphError::NodeNotFound) => {
+                match self
+                    .engine
+                    .storage
+                    .vectors
+                    .get_vector(&txn, node_key, 0, true)
+                {
+                    Ok(_) => {}
+                    Err(VectorError::VectorNotFound(_)) | Err(VectorError::EntryPointNotFound) => {
+                        return Err(StorageError::NotFound(format!(
+                            "Node '{}' was not found in Helix storage",
+                            Uuid::from_u128(node_key)
+                        )));
+                    }
+                    Err(err) => return Err(StorageError::Graph(err.into())),
+                }
+            }
+            Err(other) => return Err(StorageError::from(other)),
+        }
 
         let prefix = &node_key.to_be_bytes();
         let iter = match direction {
