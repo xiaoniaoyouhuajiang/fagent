@@ -2981,6 +2981,7 @@ name = "fstorage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrow-select",
  "async-trait",
  "bincode",
  "chrono",

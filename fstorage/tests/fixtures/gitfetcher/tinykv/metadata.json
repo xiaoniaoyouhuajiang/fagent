@@ -1,0 +1,47 @@
+{
+  "captured_at": "2025-10-21T09:51:51.922273+00:00",
+  "datasets": [
+    {
+      "arrow": "nodes/project.arrow",
+      "category": "node",
+      "json": "nodes/project.json",
+      "name": "project"
+    },
+    {
+      "arrow": "nodes/version.arrow",
+      "category": "node",
+      "json": "nodes/version.json",
+      "name": "version"
+    },
+    {
+      "arrow": "nodes/commit.arrow",
+      "category": "node",
+      "json": "nodes/commit.json",
+      "name": "commit"
+    },
+    {
+      "arrow": "edges/edge_hasversion.arrow",
+      "category": "edge",
+      "json": "edges/edge_hasversion.json",
+      "name": "edge_hasversion"
+    },
+    {
+      "arrow": "edges/edge_iscommit.arrow",
+      "category": "edge",
+      "json": "edges/edge_iscommit.json",
+      "name": "edge_iscommit"
+    },
+    {
+      "arrow": "vectors/readmechunk.arrow",
+      "category": "vector",
+      "json": "vectors/readmechunk.json",
+      "name": "readmechunk"
+    }
+  ],
+  "fetcher": "gitfetcher",
+  "params": {
+    "include_code": true,
+    "mode": "repo_snapshot",
+    "repo": "talent-plan/tinykv"
+  }
+}

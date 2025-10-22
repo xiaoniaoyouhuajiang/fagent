@@ -33,3 +33,6 @@ helix-db = { git = "https://github.com/HelixDB/helix-db", features = ["full"] }
 # helix-db = { path = "../deps/helix-db", features = ["full"] }
 anyhow = "1.0"
 heck = "0.5.0"
+
+[dev-dependencies]
+arrow-select = "56.2.0"
