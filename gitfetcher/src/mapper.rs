@@ -177,6 +177,7 @@ async fn append_code_graph(
         repo_url: &clone_source,
         display_name: &repo.full_name,
         revision: &snapshot.revision.sha,
+        enable_incremental_filter: false,
     })
     .await?;
 

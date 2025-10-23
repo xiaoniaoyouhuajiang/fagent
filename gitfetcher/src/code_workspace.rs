@@ -25,6 +25,8 @@ pub struct WorkspaceConfig<'a> {
     pub display_name: &'a str,
     /// Commit SHA or reference to checkout. If empty, HEAD will be used.
     pub revision: &'a str,
+    /// Whether to pass revision history to AST for incremental filtering.
+    pub enable_incremental_filter: bool,
 }
 
 pub struct CodeWorkspace {
@@ -102,15 +104,17 @@ pub async fn prepare_workspace(config: WorkspaceConfig<'_>) -> StorageResult<Cod
     let _guard_repo_path = EnvVarGuard::set("REPO_PATH", Some(&checkout_str));
 
     let repo_origin = make_origin_url(config.display_name, &repo_url);
+    let revs = if config.enable_incremental_filter && !revision.is_empty() {
+        vec![revision.clone()]
+    } else {
+        Vec::new()
+    };
+
     let repos = ast::repo::Repo::new_multi_detect(
         &checkout_str,
         Some(repo_origin),
         Vec::new(),
-        if revision.is_empty() {
-            Vec::new()
-        } else {
-            vec![revision.clone()]
-        },
+        revs,
         Some(false),
     )
     .await
@@ -340,6 +344,7 @@ mod tests {
                 repo_url: &repo_url,
                 display_name: "local/test",
                 revision: &revision,
+                enable_incremental_filter: false,
             })
             .await
             .expect("workspace");

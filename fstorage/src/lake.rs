@@ -3,6 +3,10 @@ use crate::errors::{Result, StorageError};
 use crate::models::{ColumnSummary, HybridSearchHit, TableSummary, TextSearchHit, VectorSearchHit};
 use crate::utils;
 use chrono::{DateTime, Utc};
+use deltalake::DeltaTable;
+use deltalake::DeltaTableBuilder;
+use deltalake::ObjectStore;
+use deltalake::Path;
 use deltalake::arrow::array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
     TimestampMicrosecondArray, UInt32Array, UInt64Array,
@@ -15,14 +19,10 @@ use deltalake::datafusion::execution::context::{SessionConfig, SessionContext};
 use deltalake::kernel::Action;
 use deltalake::operations::DeltaOps;
 use deltalake::protocol::SaveMode;
-use deltalake::DeltaTable;
-use deltalake::DeltaTableBuilder;
-use deltalake::ObjectStore;
-use deltalake::Path;
 use heed3::RoTxn;
 use helix_db::helix_engine::bm25::bm25::BM25;
-use helix_db::helix_engine::storage_core::storage_methods::StorageMethods;
 use helix_db::helix_engine::storage_core::HelixGraphStorage;
+use helix_db::helix_engine::storage_core::storage_methods::StorageMethods;
 use helix_db::helix_engine::traversal_core::HelixGraphEngine;
 use helix_db::helix_engine::types::{GraphError, VectorError};
 use helix_db::helix_engine::vector_core::hnsw::HNSW;
