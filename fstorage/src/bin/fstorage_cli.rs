@@ -17,14 +17,10 @@ use fstorage::config::StorageConfig;
 use fstorage::lake::{NeighborDirection, NeighborRecord, Subgraph};
 use fstorage::models::{IngestionOffset, TableSummary};
 use helix_db::helix_engine::storage_core::{
-    graph_visualization::GraphVisualization,
-    storage_methods::StorageMethods,
+    graph_visualization::GraphVisualization, storage_methods::StorageMethods,
 };
 use helix_db::helix_engine::traversal_core::{
-    ops::{
-        g::G,
-        source::n_from_type::NFromTypeAdapter,
-    },
+    ops::{g::G, source::n_from_type::NFromTypeAdapter},
     traversal_value::TraversalValue,
 };
 use helix_db::protocol::value::Value as HelixValue;
@@ -658,8 +654,7 @@ async fn list_nodes_by_label(
     let lake_root = storage.config.lake_path.clone();
     let table_path = format!("silver/index/{label}");
 
-    let (batches, cold_available) = match read_table_batches(&lake_root, &table_path, limit).await
-    {
+    let (batches, cold_available) = match read_table_batches(&lake_root, &table_path, limit).await {
         Ok(batches) => (batches, true),
         Err(err) => {
             log::warn!(
@@ -722,9 +717,7 @@ async fn list_nodes_by_label(
                 match storage.engine.storage.get_node(&txn, &id_u128) {
                     Ok(node) => nodes.push(node_to_json(&node)),
                     Err(err) => {
-                        log::warn!(
-                            "Node {id_str} not present in Helix (label={label}): {err}"
-                        );
+                        log::warn!("Node {id_str} not present in Helix (label={label}): {err}");
                     }
                 }
             }

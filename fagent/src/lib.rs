@@ -19,7 +19,7 @@ use fstorage::sync::DataSynchronizer;
 use fstorage::{
     config::StorageConfig,
     errors::StorageError,
-    fetch::FetcherCapability,
+    fetch::{EntityCategory, FetcherCapability},
     models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext, TableSummary},
     FStorage,
 };
@@ -155,6 +155,16 @@ struct GraphOverviewQuery {
 }
 
 #[derive(Clone, Deserialize)]
+struct GraphSearchQuery {
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    entity_type: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Deserialize)]
 struct GraphSubgraphQuery {
     start_id: String,
     #[serde(default)]
@@ -234,6 +244,11 @@ struct GraphOverviewResponse {
     candidates: Vec<GraphNodeSummary>,
 }
 
+#[derive(Serialize)]
+struct GraphSearchResponse {
+    candidates: Vec<GraphNodeSummary>,
+}
+
 #[derive(Serialize, Clone)]
 struct GraphNodeDto {
     id: String,
@@ -270,8 +285,259 @@ fn init_tracing() {
 }
 
 const INDEX_HTML: &str = include_str!("../dashboard_ui/index.html");
+const GRAPH_HTML: &str = include_str!("../dashboard_ui/graph.html");
 const STYLES_CSS: &str = include_str!("../dashboard_ui/styles.css");
 const APP_JS: &str = include_str!("../dashboard_ui/app.js");
+const GRAPH_JS: &str = include_str!("../dashboard_ui/graph.js");
+
+#[derive(Serialize, Clone)]
+struct GraphTypeColorStyle {
+    background: &'static str,
+    border: &'static str,
+    highlight_background: &'static str,
+    highlight_border: &'static str,
+}
+
+#[derive(Serialize, Clone)]
+struct GraphTypeStyle {
+    entity_type: &'static str,
+    display_name: &'static str,
+    font_color: &'static str,
+    color: GraphTypeColorStyle,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aliases: Option<&'static [&'static str]>,
+}
+
+const GRAPH_TYPE_STYLES: &[GraphTypeStyle] = &[
+    GraphTypeStyle {
+        entity_type: "Project",
+        display_name: "Project 项目",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#0ea5e9",
+            border: "#38bdf8",
+            highlight_background: "#38bdf8",
+            highlight_border: "#0ea5e9",
+        },
+        aliases: Some(&["PROJECT"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Version",
+        display_name: "Version 版本",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#22d3ee",
+            border: "#67e8f9",
+            highlight_background: "#67e8f9",
+            highlight_border: "#22d3ee",
+        },
+        aliases: Some(&["VERSION"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Commit",
+        display_name: "Commit 提交",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#f97316",
+            border: "#fb923c",
+            highlight_background: "#fb923c",
+            highlight_border: "#f97316",
+        },
+        aliases: Some(&["COMMIT"]),
+    },
+    GraphTypeStyle {
+        entity_type: "File",
+        display_name: "File 文件",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#6366f1",
+            border: "#818cf8",
+            highlight_background: "#818cf8",
+            highlight_border: "#6366f1",
+        },
+        aliases: Some(&["FILE"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Directory",
+        display_name: "Directory 目录",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#6b7280",
+            border: "#9ca3af",
+            highlight_background: "#9ca3af",
+            highlight_border: "#6b7280",
+        },
+        aliases: Some(&["DIRECTORY"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Module",
+        display_name: "Module 模块",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#8b5cf6",
+            border: "#a855f7",
+            highlight_background: "#a855f7",
+            highlight_border: "#8b5cf6",
+        },
+        aliases: Some(&["MODULE"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Class",
+        display_name: "Class 类",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#14b8a6",
+            border: "#2dd4bf",
+            highlight_background: "#2dd4bf",
+            highlight_border: "#14b8a6",
+        },
+        aliases: Some(&["CLASS"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Struct",
+        display_name: "Struct 结构体",
+        font_color: "#e0f2f1",
+        color: GraphTypeColorStyle {
+            background: "#0f766e",
+            border: "#14b8a6",
+            highlight_background: "#14b8a6",
+            highlight_border: "#0f766e",
+        },
+        aliases: Some(&["STRUCT"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Trait",
+        display_name: "Trait 特征",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#059669",
+            border: "#34d399",
+            highlight_background: "#34d399",
+            highlight_border: "#059669",
+        },
+        aliases: Some(&["TRAIT"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Function",
+        display_name: "Function 函数",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#ef4444",
+            border: "#f87171",
+            highlight_background: "#f87171",
+            highlight_border: "#ef4444",
+        },
+        aliases: Some(&["FUNCTION"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Method",
+        display_name: "Method 方法",
+        font_color: "#f8fafc",
+        color: GraphTypeColorStyle {
+            background: "#dc2626",
+            border: "#f87171",
+            highlight_background: "#f87171",
+            highlight_border: "#dc2626",
+        },
+        aliases: Some(&["METHOD"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Interface",
+        display_name: "Interface 接口",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#2563eb",
+            border: "#3b82f6",
+            highlight_background: "#3b82f6",
+            highlight_border: "#2563eb",
+        },
+        aliases: Some(&["INTERFACE"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Enum",
+        display_name: "Enum 枚举",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#fbbf24",
+            border: "#fcd34d",
+            highlight_background: "#fcd34d",
+            highlight_border: "#fbbf24",
+        },
+        aliases: Some(&["ENUM"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Package",
+        display_name: "Package 包",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#9333ea",
+            border: "#a855f7",
+            highlight_background: "#a855f7",
+            highlight_border: "#9333ea",
+        },
+        aliases: Some(&["PACKAGE"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Call",
+        display_name: "Call 调用",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#f59e0b",
+            border: "#fbbf24",
+            highlight_background: "#fbbf24",
+            highlight_border: "#f59e0b",
+        },
+        aliases: Some(&["CALL"]),
+    },
+    GraphTypeStyle {
+        entity_type: "ReadmeChunk",
+        display_name: "README 片段",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#facc15",
+            border: "#fde047",
+            highlight_background: "#fde047",
+            highlight_border: "#facc15",
+        },
+        aliases: Some(&["README_CHUNK", "README"]),
+    },
+    GraphTypeStyle {
+        entity_type: "CodeChunk",
+        display_name: "Code 片段",
+        font_color: "#0f172a",
+        color: GraphTypeColorStyle {
+            background: "#22c55e",
+            border: "#4ade80",
+            highlight_background: "#4ade80",
+            highlight_border: "#22c55e",
+        },
+        aliases: Some(&["CODE_CHUNK"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Vector",
+        display_name: "向量表示",
+        font_color: "#3b0764",
+        color: GraphTypeColorStyle {
+            background: "#e879f9",
+            border: "#f0abfc",
+            highlight_background: "#f0abfc",
+            highlight_border: "#e879f9",
+        },
+        aliases: Some(&["VECTOR", "EMBEDDING"]),
+    },
+    GraphTypeStyle {
+        entity_type: "Default",
+        display_name: "其他",
+        font_color: "#e2e8f0",
+        color: GraphTypeColorStyle {
+            background: "#475569",
+            border: "#94a3b8",
+            highlight_background: "#94a3b8",
+            highlight_border: "#475569",
+        },
+        aliases: None,
+    },
+];
 
 async fn run_dashboard(args: DashboardArgs) -> anyhow::Result<()> {
     let addr: SocketAddr = args.bind.parse().context("failed to parse bind address")?;
@@ -313,6 +579,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/status", get(get_status))
         .route("/api/tables", get(list_tables))
         .route("/api/graph/overview", get(graph_overview))
+        .route("/api/graph/types", get(graph_types))
+        .route("/api/graph/search", get(graph_search))
         .route("/api/graph/subgraph", get(graph_subgraph))
         .route("/api/graph/node", get(graph_node_detail))
         .route("/api/graph/visual", get(graph_visual))
@@ -322,8 +590,10 @@ pub fn build_router(state: AppState) -> Router {
 
     let static_routes = Router::new()
         .route("/", get(serve_index))
+        .route("/graph.html", get(serve_graph))
         .route("/styles.css", get(serve_styles))
         .route("/app.js", get(serve_app_js))
+        .route("/graph.js", get(serve_graph_js))
         .fallback(get(serve_index));
 
     api.merge(static_routes)
@@ -331,6 +601,10 @@ pub fn build_router(state: AppState) -> Router {
 
 async fn serve_index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+async fn serve_graph() -> Html<&'static str> {
+    Html(GRAPH_HTML)
 }
 
 async fn serve_styles() -> Response {
@@ -346,6 +620,14 @@ async fn serve_app_js() -> Response {
         .status(StatusCode::OK)
         .header("Content-Type", "application/javascript; charset=utf-8")
         .body(Body::from(APP_JS))
+        .unwrap()
+}
+
+async fn serve_graph_js() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/javascript; charset=utf-8")
+        .body(Body::from(GRAPH_JS))
         .unwrap()
 }
 
@@ -421,11 +703,27 @@ async fn graph_visual(
     Ok(Json(payload))
 }
 
+async fn graph_types() -> ApiResult<Json<Vec<GraphTypeStyle>>> {
+    let styles: Vec<GraphTypeStyle> = GRAPH_TYPE_STYLES.iter().cloned().collect();
+    Ok(Json(styles))
+}
+
 async fn graph_overview(
     State(state): State<AppState>,
     Query(query): Query<GraphOverviewQuery>,
 ) -> ApiResult<Json<GraphOverviewResponse>> {
-    let limit = query.limit.unwrap_or(30).min(300).max(1);
+    let limit = query.limit.unwrap_or(30).clamp(1, 300);
+    let candidates = collect_overview_candidates(&state, limit).await?;
+    Ok(Json(GraphOverviewResponse { candidates }))
+}
+
+async fn collect_overview_candidates(
+    state: &AppState,
+    limit: usize,
+) -> ApiResult<Vec<GraphNodeSummary>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
 
     let snapshot = {
         let txn = state
@@ -435,13 +733,12 @@ async fn graph_overview(
             .graph_env
             .read_txn()
             .map_err(|err| ApiError::Internal(err.to_string()))?;
-        let raw = state
+        state
             .storage
             .engine
             .storage
             .nodes_edges_to_json(&txn, Some(limit), None)
-            .map_err(|err| ApiError::from_storage(StorageError::Graph(err)))?;
-        raw
+            .map_err(|err| ApiError::from_storage(StorageError::Graph(err)))?
     };
 
     let parsed: JsonValue =
@@ -483,7 +780,103 @@ async fn graph_overview(
         }
     }
 
-    Ok(Json(GraphOverviewResponse { candidates }))
+    Ok(candidates)
+}
+
+async fn graph_search(
+    State(state): State<AppState>,
+    Query(query): Query<GraphSearchQuery>,
+) -> ApiResult<Json<GraphSearchResponse>> {
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let term = query.q.unwrap_or_default();
+    let term = term.trim();
+    let entity_type = query.entity_type.as_deref();
+
+    let candidates = if term.is_empty() && entity_type.is_none() {
+        collect_overview_candidates(&state, limit).await?
+    } else {
+        search_candidates(&state, term, entity_type, limit).await?
+    };
+
+    Ok(Json(GraphSearchResponse { candidates }))
+}
+
+async fn search_candidates(
+    state: &AppState,
+    term: &str,
+    entity_type: Option<&str>,
+    limit: usize,
+) -> ApiResult<Vec<GraphNodeSummary>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut entity_types = Vec::new();
+    if let Some(explicit) = entity_type {
+        entity_types.push(explicit.to_string());
+    } else {
+        let offsets = state
+            .storage
+            .catalog
+            .list_ingestion_offsets()
+            .map_err(ApiError::from_storage)?;
+        for offset in offsets {
+            if offset.category == EntityCategory::Node {
+                entity_types.push(offset.entity_type);
+            }
+        }
+    }
+
+    if entity_types.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    entity_types.sort();
+    entity_types.dedup();
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut results = Vec::new();
+
+    for entity in entity_types {
+        if results.len() >= limit {
+            break;
+        }
+        let remaining = limit - results.len();
+        let rows = state
+            .storage
+            .lake
+            .search_index_nodes(&entity, term, remaining)
+            .await
+            .map_err(ApiError::from_storage)?;
+
+        for row in rows {
+            if results.len() >= limit {
+                break;
+            }
+            let Some(id) = row.get("id").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            if !seen.insert(id.to_string()) {
+                continue;
+            }
+
+            let node_map = state
+                .storage
+                .lake
+                .get_node_by_id(id, Some(&entity))
+                .await
+                .map_err(ApiError::from_storage)?;
+            let Some(node_map) = node_map else {
+                continue;
+            };
+
+            if let Some(summary) = map_node_summary(node_map) {
+                results.push(summary);
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 async fn graph_subgraph(

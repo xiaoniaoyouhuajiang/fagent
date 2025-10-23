@@ -1052,6 +1052,82 @@ impl Lake {
         Self::record_batches_to_maps(&batches)
     }
 
+    pub async fn search_index_nodes(
+        &self,
+        entity_type: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<HashMap<String, JsonValue>>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let table_name = format!("silver/index/{entity_type}");
+        let Some(table) = self.open_delta_table(&table_name).await? else {
+            return Ok(Vec::new());
+        };
+
+        let schema = table.schema();
+        let mut clauses = Vec::new();
+        let mut has_updated_at = false;
+        let pattern = format!("%{}%", trimmed.to_lowercase());
+        let escaped_pattern = Self::escape_sql_literal(&pattern);
+
+        for field in schema.fields() {
+            match field.data_type() {
+                DataType::Utf8 | DataType::LargeUtf8 => {
+                    if field.name() != "id" {
+                        let identifier = Self::escape_sql_identifier(field.name());
+                        clauses.push(format!("LOWER({identifier}) LIKE '{escaped_pattern}'"));
+                    }
+                }
+                DataType::Timestamp(_, _) => {
+                    if field.name() == "updated_at" {
+                        has_updated_at = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if clauses.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let alias = Self::sanitize_table_alias(&table_name);
+        let ctx = Self::single_partition_session();
+        ctx.register_table(&alias, Arc::new(table))
+            .map_err(|e| StorageError::Other(e.into()))?;
+
+        let where_clause = clauses.join(" OR ");
+        let order_clause = if has_updated_at {
+            " ORDER BY updated_at DESC"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT * FROM {alias} WHERE {where_clause}{order_clause} LIMIT {limit}",
+            alias = alias,
+            where_clause = where_clause,
+            order_clause = order_clause,
+            limit = limit
+        );
+
+        let batches = ctx
+            .sql(&sql)
+            .await
+            .map_err(|e| StorageError::Other(e.into()))?
+            .collect()
+            .await
+            .map_err(|e| StorageError::Other(e.into()))?;
+
+        Self::record_batches_to_maps(&batches)
+    }
+
     pub async fn table_sql(
         &self,
         table_name: &str,

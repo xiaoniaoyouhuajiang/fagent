@@ -40,6 +40,29 @@ header h1 {
     letter-spacing: 0.02em;
 }
 
+.header-actions {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+}
+
+.link-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.4rem 1rem;
+    border-radius: 999px;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    text-decoration: none;
+    transition: background 0.2s ease, color 0.2s ease, transform 0.1s ease;
+}
+
+.link-button:hover {
+    background: var(--accent);
+    color: #0f172a;
+}
+
 button {
     border: 1px solid var(--accent);
     background: transparent;
@@ -88,6 +111,11 @@ section {
     box-shadow: 0 12px 32px rgba(15, 23, 42, 0.25);
 }
 
+#graph-search-section,
+#graph-visual-section {
+    width: 100%;
+}
+
 .section-header {
     display: flex;
     justify-content: space-between;
@@ -107,6 +135,38 @@ section {
     gap: 0.6rem;
     align-items: center;
     flex-wrap: wrap;
+}
+
+.graph-search-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.graph-params {
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    align-items: flex-end;
+}
+
+.graph-selected-hint {
+    font-size: 0.85rem;
+    color: var(--muted);
+}
+
+.graph-page main {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.graph-page #graph-container {
+    height: 480px;
+}
+
+.graph-page .graph-legend {
+    margin-top: 0.5rem;
 }
 
 .sync-form {
@@ -152,7 +212,7 @@ textarea:focus {
 #graph-container {
     height: 320px;
     border-radius: 12px;
-    background: rgba(15, 23, 42, 0.45);
+    background: rgba(30, 241, 159, 0.25);
     border: 1px solid var(--border);
 }
 
@@ -174,7 +234,8 @@ textarea:focus {
     background: rgba(148, 163, 184, 0.15);
     border: 1px solid rgba(148, 163, 184, 0.25);
     font-size: 0.8rem;
-    color: var(--muted);
+    color: inherit;
+    font-weight: 500;
 }
 
 .legend-swatch {
@@ -183,6 +244,37 @@ textarea:focus {
     border-radius: 999px;
     border: 2px solid transparent;
     display: inline-block;
+}
+
+.search-results {
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 0.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    max-height: 240px;
+    overflow-y: auto;
+    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.35);
+}
+
+.suggestion-item {
+    text-align: left;
+    background: rgba(148, 163, 184, 0.12);
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 0.45rem 0.6rem;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.suggestion-item:hover {
+    background: rgba(34, 211, 238, 0.25);
+    border-color: var(--accent);
+    transform: translateY(-1px);
+    color: var(--text);
 }
 
 .hidden {

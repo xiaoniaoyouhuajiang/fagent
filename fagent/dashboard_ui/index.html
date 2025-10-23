@@ -5,12 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FStorage Dashboard</title>
     <link rel="stylesheet" href="styles.css" />
-    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
     <header>
         <h1>FStorage Dashboard</h1>
-        <button id="refresh-all">刷新全部</button>
+        <nav class="header-actions">
+            <a class="link-button" href="graph.html" target="_blank" rel="noopener">图谱探索</a>
+            <button id="refresh-all">刷新全部</button>
+        </nav>
     </header>
 
     <main>
@@ -28,38 +30,6 @@
                 <button id="refresh-fetchers">刷新</button>
             </div>
             <div id="fetcher-list"></div>
-        </section>
-
-        <section id="graph-section">
-            <div class="section-header">
-                <h2>图可视化</h2>
-                <div class="graph-controls">
-                    <label>
-                        起始节点
-                        <select id="graph-start-node"></select>
-                    </label>
-                    <label>
-                        搜索深度
-                        <input id="graph-depth" type="number" min="0" max="4" value="1" />
-                    </label>
-                    <label>
-                        节点上限
-                        <input id="graph-node-limit" type="number" min="10" max="300" value="150" />
-                    </label>
-                    <label>
-                        边类型过滤
-                        <input
-                            id="graph-edge-types"
-                            type="text"
-                            placeholder="edge_containscontent,edge_uses"
-                        />
-                    </label>
-                    <button id="refresh-graph">刷新</button>
-                </div>
-            </div>
-            <div id="graph-container"></div>
-            <div id="graph-legend" class="graph-legend hidden"></div>
-            <div id="graph-error" class="error-message"></div>
         </section>
 
         <section id="sync-section">

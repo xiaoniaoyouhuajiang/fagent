@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>图谱探索 · FStorage Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+</head>
+<body class="graph-page">
+    <header>
+        <h1>图谱探索</h1>
+        <nav class="header-actions">
+            <a class="link-button" href="index.html">返回仪表盘</a>
+        </nav>
+    </header>
+
+    <main>
+        <section id="graph-search-section">
+            <div class="section-header">
+                <h2>选择起始节点</h2>
+            </div>
+            <div class="graph-search-controls">
+                <label class="stack">
+                    起始节点
+                    <input
+                        id="graph-search-input"
+                        type="text"
+                        placeholder="输入节点名称或 UUID"
+                        autocomplete="off"
+                    />
+                </label>
+                <label class="stack">
+                    节点类型
+                    <select id="graph-type-filter">
+                        <option value="">全部类型</option>
+                    </select>
+                </label>
+                <div id="graph-search-results" class="search-results hidden"></div>
+                <div class="graph-params">
+                    <label>
+                        搜索深度
+                        <input id="graph-depth" type="number" min="0" max="4" value="1" />
+                    </label>
+                    <label>
+                        节点上限
+                        <input id="graph-node-limit" type="number" min="10" max="300" value="150" />
+                    </label>
+                    <label>
+                        边类型过滤
+                        <input
+                            id="graph-edge-types"
+                            type="text"
+                            placeholder="edge_containscontent,edge_uses"
+                        />
+                    </label>
+                    <button id="graph-load">加载图谱</button>
+                </div>
+                <div id="graph-selected" class="graph-selected-hint"></div>
+            </div>
+        </section>
+
+        <section id="graph-visual-section">
+            <div id="graph-container"></div>
+            <div id="graph-legend" class="graph-legend hidden"></div>
+            <div id="graph-error" class="error-message"></div>
+        </section>
+    </main>
+
+    <footer>
+        <span>FStorage Dashboard · 图谱探索</span>
+    </footer>
+
+    <script type="module" src="graph.js"></script>
+</body>
+</html>
