@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::{Parser, Subcommand, ValueEnum, builder::ArgAction};
-use deltalake::arrow::array::ArrayRef;
+use deltalake::arrow::array::{Array, ArrayRef};
 use deltalake::arrow::util::pretty::pretty_format_batches;
 use deltalake::datafusion::datasource::TableProvider;
 use deltalake::datafusion::execution::context::{SessionConfig, SessionContext};
@@ -16,14 +16,24 @@ use fstorage::FStorage;
 use fstorage::config::StorageConfig;
 use fstorage::lake::{NeighborDirection, NeighborRecord, Subgraph};
 use fstorage::models::{IngestionOffset, TableSummary};
-use helix_db::helix_engine::storage_core::graph_visualization::GraphVisualization;
-use helix_db::helix_engine::traversal_core::HelixGraphEngine;
+use helix_db::helix_engine::storage_core::{
+    graph_visualization::GraphVisualization,
+    storage_methods::StorageMethods,
+};
+use helix_db::helix_engine::traversal_core::{
+    ops::{
+        g::G,
+        source::n_from_type::NFromTypeAdapter,
+    },
+    traversal_value::TraversalValue,
+};
 use helix_db::protocol::value::Value as HelixValue;
 use helix_db::utils::id::ID;
 use helix_db::utils::items::Node;
 use log::LevelFilter;
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use url::Url;
+use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -377,7 +387,7 @@ async fn handle_hot(storage: &FStorage, command: HotCommand) -> Result<()> {
             Ok(())
         }
         HotCommand::Nodes { label, limit, json } => {
-            let nodes = list_nodes_by_label(storage.engine.as_ref(), &label, limit)?;
+            let nodes = list_nodes_by_label(storage, &label, limit).await?;
             if nodes.is_empty() {
                 println!("No nodes with label '{label}' were found.");
                 return Ok(());
@@ -640,25 +650,90 @@ async fn open_table_summary(lake_root: &Path, table_path: &str) -> Result<TableS
     })
 }
 
-fn list_nodes_by_label(
-    engine: &HelixGraphEngine,
+async fn list_nodes_by_label(
+    storage: &FStorage,
     label: &str,
     limit: usize,
 ) -> Result<Vec<JsonValue>> {
-    let txn = engine.storage.graph_env.read_txn()?;
-    let mut nodes = Vec::new();
-    let mut seen = 0usize;
-    for next in engine.storage.nodes_db.iter(&txn)? {
-        let (id, raw) = next?;
-        let node = Node::decode_node(raw, id).map_err(|err| anyhow!(err.to_string()))?;
-        if node.label == label {
-            nodes.push(node_to_json(&node));
-            seen += 1;
-            if limit != 0 && seen >= limit {
-                break;
+    let lake_root = storage.config.lake_path.clone();
+    let table_path = format!("silver/index/{label}");
+
+    let (batches, cold_available) = match read_table_batches(&lake_root, &table_path, limit).await
+    {
+        Ok(batches) => (batches, true),
+        Err(err) => {
+            log::warn!(
+                "Falling back to hot scan; failed to read Delta table '{table_path}': {err}"
+            );
+            (Vec::new(), false)
+        }
+    };
+
+    let mut ids = Vec::new();
+    for batch in &batches {
+        if let Some((idx, _)) = batch.schema().column_with_name("id") {
+            let column = batch
+                .column(idx)
+                .as_any()
+                .downcast_ref::<deltalake::arrow::array::StringArray>();
+            if let Some(arr) = column {
+                for row in 0..arr.len() {
+                    if arr.is_null(row) {
+                        continue;
+                    }
+                    ids.push(arr.value(row).to_string());
+                }
             }
         }
     }
+
+    if ids.is_empty() && !batches.is_empty() {
+        log::warn!("Delta table '{table_path}' does not contain an 'id' column");
+    }
+
+    if !cold_available {
+        // Cold read failed; fall back to scanning hot layer.
+        let engine = storage.engine.as_ref();
+        let txn = engine.storage.graph_env.read_txn()?;
+        let traversal = G::new(engine.storage.clone(), &txn).n_from_type(label);
+        let values: Vec<TraversalValue> = if limit == 0 {
+            traversal.collect_to::<Vec<_>>()
+        } else {
+            traversal.take_and_collect_to::<Vec<_>>(limit)
+        };
+
+        let nodes = values
+            .into_iter()
+            .filter_map(|value| match value {
+                TraversalValue::Node(node) => Some(node_to_json(&node)),
+                _ => None,
+            })
+            .collect();
+
+        return Ok(nodes);
+    }
+
+    let txn = storage.engine.storage.graph_env.read_txn()?;
+    let mut nodes = Vec::new();
+    for id_str in ids {
+        match Uuid::parse_str(&id_str) {
+            Ok(uuid) => {
+                let id_u128 = uuid.as_u128();
+                match storage.engine.storage.get_node(&txn, &id_u128) {
+                    Ok(node) => nodes.push(node_to_json(&node)),
+                    Err(err) => {
+                        log::warn!(
+                            "Node {id_str} not present in Helix (label={label}): {err}"
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                log::warn!("Skipping malformed node id '{id_str}': {err}");
+            }
+        }
+    }
+
     Ok(nodes)
 }
 
