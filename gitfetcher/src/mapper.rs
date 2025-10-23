@@ -1,4 +1,4 @@
-use std::{collections::HashMap, convert::TryFrom, sync::Arc};
+use std::{collections::HashMap, convert::TryFrom, path::Path, sync::Arc};
 
 use crate::readme::{chunk_readme, ReadmeChunkPiece};
 use ast::lang::asg::NodeData;
@@ -183,12 +183,14 @@ async fn append_code_graph(
 
     let code_graph = workspace.build_graph().await?;
     let version_descriptor = NodeDescriptor::new(Version::ENTITY_TYPE, version_node_id.to_string());
+    let repo_root = workspace.repo_root();
     translate_ast_graph(
         graph,
         &code_graph,
         snapshot.commit.authored_at,
         &snapshot.revision.sha,
         &version_descriptor,
+        repo_root,
     )?;
     Ok(())
 }
@@ -329,12 +331,13 @@ fn translate_ast_graph(
     commit_ts: DateTime<Utc>,
     version_sha: &str,
     version_descriptor: &NodeDescriptor,
+    repo_root: &Path,
 ) -> StorageResult<()> {
     let mut descriptors: HashMap<String, NodeDescriptor> = HashMap::new();
     let mut nodes = NodeBuckets::default();
 
     for (key, node) in &code_graph.nodes {
-        if let Some(mapped) = map_ast_node(node, version_sha) {
+        if let Some(mapped) = map_ast_node(node, version_sha, repo_root) {
             match mapped {
                 MappedNode::File(value, descriptor) => {
                     descriptors.insert(key.clone(), descriptor);
@@ -491,6 +494,7 @@ mod tests {
             Utc::now(),
             "deadbeef",
             &version_descriptor,
+            Path::new("/dummy/repo"),
         )
         .expect("translate");
 
@@ -507,13 +511,14 @@ mod tests {
     }
 }
 
-fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
+fn map_ast_node(node: &AstNode, version_sha: &str, repo_root: &Path) -> Option<MappedNode> {
     match node.node_type {
         NodeType::File => {
-            let path = optional_string(&node.node_data.file)
+            let raw_path = optional_string(&node.node_data.file)
                 .or_else(|| optional_string(&node.node_data.name))?;
             let language = meta_value(&node.node_data, "language");
             let version_sha_owned = version_sha.to_owned();
+            let path = normalize_file_path(&raw_path, repo_root);
             let descriptor = NodeDescriptor::new(
                 File::ENTITY_TYPE,
                 uuid_from_node(
@@ -536,7 +541,8 @@ fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
         NodeType::Class => {
             let name = optional_string(&node.node_data.name)?;
             let (start_line, end_line) = line_bounds(&node.node_data);
-            let file_path = node_file_path(&node.node_data)?;
+            let raw_file_path = node_file_path(&node.node_data)?;
+            let file_path = normalize_file_path(&raw_file_path, repo_root);
             let version_sha_owned = version_sha.to_owned();
             let descriptor = NodeDescriptor::new(
                 Class::ENTITY_TYPE,
@@ -563,7 +569,8 @@ fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
         NodeType::Trait => {
             let name = optional_string(&node.node_data.name)?;
             let (start_line, end_line) = line_bounds(&node.node_data);
-            let file_path = node_file_path(&node.node_data)?;
+            let raw_file_path = node_file_path(&node.node_data)?;
+            let file_path = normalize_file_path(&raw_file_path, repo_root);
             let version_sha_owned = version_sha.to_owned();
             let descriptor = NodeDescriptor::new(
                 Trait::ENTITY_TYPE,
@@ -593,7 +600,8 @@ fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
             let signature = meta_value(&node.node_data, "signature")
                 .or_else(|| meta_value(&node.node_data, "interface"));
             let is_component = bool_from_meta(&node.node_data, "component");
-            let file_path = node_file_path(&node.node_data)?;
+            let raw_file_path = node_file_path(&node.node_data)?;
+            let file_path = normalize_file_path(&raw_file_path, repo_root);
             let version_sha_owned = version_sha.to_owned();
             let descriptor = NodeDescriptor::new(
                 Function::ENTITY_TYPE,
@@ -624,7 +632,8 @@ fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
             let (start_line, end_line) = line_bounds(&node.node_data);
             let construct = meta_value(&node.node_data, "construct")
                 .or_else(|| meta_value(&node.node_data, "type"));
-            let file_path = node_file_path(&node.node_data)?;
+            let raw_file_path = node_file_path(&node.node_data)?;
+            let file_path = normalize_file_path(&raw_file_path, repo_root);
             let version_sha_owned = version_sha.to_owned();
             let descriptor = NodeDescriptor::new(
                 DataModel::ENTITY_TYPE,
@@ -651,7 +660,8 @@ fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
         }
         NodeType::Var => {
             let name = optional_string(&node.node_data.name)?;
-            let file_path = node_file_path(&node.node_data)?;
+            let raw_file_path = node_file_path(&node.node_data)?;
+            let file_path = normalize_file_path(&raw_file_path, repo_root);
             let version_sha_owned = version_sha.to_owned();
             let descriptor = NodeDescriptor::new(
                 Variable::ENTITY_TYPE,
@@ -677,7 +687,8 @@ fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
         NodeType::UnitTest | NodeType::IntegrationTest | NodeType::E2eTest => {
             let name = optional_string(&node.node_data.name)?;
             let (start_line, end_line) = line_bounds(&node.node_data);
-            let file_path = node_file_path(&node.node_data)?;
+            let raw_file_path = node_file_path(&node.node_data)?;
+            let file_path = normalize_file_path(&raw_file_path, repo_root);
             let version_sha_owned = version_sha.to_owned();
             let test_kind = match node.node_type {
                 NodeType::UnitTest => "unit",
@@ -713,7 +724,8 @@ fn map_ast_node(node: &AstNode, version_sha: &str) -> Option<MappedNode> {
             let path = meta_value(&node.node_data, "path")
                 .or_else(|| optional_string(&node.node_data.name))?;
             let http_method = meta_value(&node.node_data, "verb");
-            let file_path = node_file_path(&node.node_data)?;
+            let raw_file_path = node_file_path(&node.node_data)?;
+            let file_path = normalize_file_path(&raw_file_path, repo_root);
             let version_sha_owned = version_sha.to_owned();
             let descriptor = NodeDescriptor::new(
                 Endpoint::ENTITY_TYPE,
@@ -765,6 +777,15 @@ fn line_number(value: usize) -> Option<i32> {
 
 fn meta_value(data: &NodeData, key: &str) -> Option<String> {
     data.meta.get(key).cloned()
+}
+
+fn normalize_file_path(file_path: &str, repo_root: &Path) -> String {
+    let path = Path::new(file_path);
+    if let Ok(relative_path) = path.strip_prefix(repo_root) {
+        relative_path.to_string_lossy().to_string()
+    } else {
+        file_path.to_string()
+    }
 }
 
 fn node_file_path(data: &NodeData) -> Option<String> {
