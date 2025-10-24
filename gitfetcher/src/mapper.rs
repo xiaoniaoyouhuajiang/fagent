@@ -15,9 +15,9 @@ use fstorage::{
     fetch::Fetchable,
     fetch::GraphData,
     schemas::generated_schemas::{
-        Calls, Class, Commit, Contains, DataModel, Endpoint, File, Function, Handler, HasVersion,
-        Implements, Imports, IsCommit, Library, NestedIn, Operand, ParentOf, Project, ReadmeChunk,
-        Test, Trait, Uses, Variable, Version,
+        Calls, Class, Commit, Contains, DataModel, DependsOn, Endpoint, File, Function, Handler,
+        HasVersion, Implements, Imports, IsCommit, Library, NestedIn, Operand, ParentOf, Project,
+        ReadmeChunk, Test, Trait, Uses, Variable, Version,
     },
     utils::id::{stable_edge_id_u128, stable_node_id_u128},
 };
@@ -279,6 +279,7 @@ struct EdgeBuckets {
     implements: Vec<Implements>,
     nested_in: Vec<NestedIn>,
     imports: Vec<Imports>,
+    depends_on: Vec<DependsOn>,
 }
 
 impl EdgeBuckets {
@@ -309,6 +310,9 @@ impl EdgeBuckets {
         }
         if !self.imports.is_empty() {
             graph.add_entities(self.imports);
+        }
+        if !self.depends_on.is_empty() {
+            graph.add_entities(self.depends_on);
         }
     }
 }
@@ -400,9 +404,7 @@ fn translate_ast_graph(
         };
         match edge_type {
             EdgeType::Contains => {
-                edges
-                    .contains
-                    .push(make_contains(source_desc, target_desc, commit_ts));
+                push_contains_edge(&mut edges, source_desc, target_desc, commit_ts);
             }
             EdgeType::Calls => {
                 edges
@@ -474,15 +476,41 @@ mod tests {
         function_node.start = 0;
         function_node.end = 1;
 
+        let mut datamodel_node = NodeData::default();
+        datamodel_node.name = "User".into();
+        datamodel_node.file = "src/lib.rs".into();
+
+        let mut library_node = NodeData::default();
+        library_node.name = "serde".into();
+
         code_graph.add_node(NodeType::File, file_node.clone());
         code_graph.add_node(NodeType::Function, function_node.clone());
+        code_graph.add_node(NodeType::DataModel, datamodel_node.clone());
+        code_graph.add_node(NodeType::Library, library_node.clone());
         let contains_edge = Edge::contains(
             NodeType::File,
             &file_node,
             NodeType::Function,
             &function_node,
         );
+        let file_datamodel_edge = Edge::contains(
+            NodeType::File,
+            &file_node,
+            NodeType::DataModel,
+            &datamodel_node,
+        );
+        let function_datamodel_edge = Edge::contains(
+            NodeType::Function,
+            &function_node,
+            NodeType::DataModel,
+            &datamodel_node,
+        );
+        let file_library_edge =
+            Edge::contains(NodeType::File, &file_node, NodeType::Library, &library_node);
         code_graph.add_edge(contains_edge);
+        code_graph.add_edge(file_datamodel_edge);
+        code_graph.add_edge(function_datamodel_edge);
+        code_graph.add_edge(file_library_edge);
 
         let version_descriptor = NodeDescriptor::new(
             Version::ENTITY_TYPE,
@@ -508,6 +536,80 @@ mod tests {
         assert!(entity_types.contains(&File::ENTITY_TYPE));
         assert!(entity_types.contains(&Function::ENTITY_TYPE));
         assert!(entity_types.contains(&Contains::ENTITY_TYPE));
+
+        use deltalake::arrow::array::{Array, StringArray};
+        let mut contain_pairs = Vec::new();
+        let mut depends_pairs = Vec::new();
+
+        for entity in &graph.entities {
+            let entity_type = entity.entity_type_any();
+            if entity_type == Contains::ENTITY_TYPE {
+                let batch = entity.to_record_batch_any().expect("contains batch");
+                let schema = batch.schema();
+                let from_idx = schema.index_of("from_node_type").expect("from_node_type");
+                let to_idx = schema.index_of("to_node_type").expect("to_node_type");
+                let from_col = batch
+                    .column(from_idx)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("StringArray");
+                let to_col = batch
+                    .column(to_idx)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("StringArray");
+                for i in 0..batch.num_rows() {
+                    if from_col.is_null(i) || to_col.is_null(i) {
+                        continue;
+                    }
+                    contain_pairs
+                        .push((from_col.value(i).to_string(), to_col.value(i).to_string()));
+                }
+            } else if entity_type == DependsOn::ENTITY_TYPE {
+                let batch = entity.to_record_batch_any().expect("depends_on batch");
+                let schema = batch.schema();
+                let from_idx = schema.index_of("from_node_type").expect("from_node_type");
+                let to_idx = schema.index_of("to_node_type").expect("to_node_type");
+                let from_col = batch
+                    .column(from_idx)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("StringArray");
+                let to_col = batch
+                    .column(to_idx)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("StringArray");
+                for i in 0..batch.num_rows() {
+                    if from_col.is_null(i) || to_col.is_null(i) {
+                        continue;
+                    }
+                    depends_pairs
+                        .push((from_col.value(i).to_string(), to_col.value(i).to_string()));
+                }
+            }
+        }
+
+        assert!(
+            contain_pairs.contains(&("version".to_string(), "file".to_string())),
+            "expected version->file contains edge"
+        );
+        assert!(
+            contain_pairs.contains(&("file".to_string(), "function".to_string())),
+            "expected file->function contains edge"
+        );
+        assert!(
+            contain_pairs.contains(&("file".to_string(), "datamodel".to_string())),
+            "expected file->datamodel contains edge"
+        );
+        assert!(
+            !contain_pairs.contains(&("function".to_string(), "datamodel".to_string())),
+            "function->datamodel should not be emitted as CONTAINS"
+        );
+        assert!(
+            depends_pairs.contains(&("file".to_string(), "library".to_string())),
+            "expected file->library depends_on edge"
+        );
     }
 }
 
@@ -834,6 +936,39 @@ fn edge_base(
     }
 }
 
+fn push_contains_edge(
+    edges: &mut EdgeBuckets,
+    from: &NodeDescriptor,
+    to: &NodeDescriptor,
+    created_at: DateTime<Utc>,
+) {
+    let from_type = from.entity_type;
+    let to_type = to.entity_type;
+
+    if from_type == Version::ENTITY_TYPE && to_type == File::ENTITY_TYPE {
+        edges.contains.push(make_contains(from, to, created_at));
+        return;
+    }
+
+    if from_type == File::ENTITY_TYPE {
+        if to_type == Class::ENTITY_TYPE
+            || to_type == Function::ENTITY_TYPE
+            || to_type == DataModel::ENTITY_TYPE
+            || to_type == Variable::ENTITY_TYPE
+            || to_type == Test::ENTITY_TYPE
+            || to_type == Endpoint::ENTITY_TYPE
+        {
+            edges.contains.push(make_contains(from, to, created_at));
+            return;
+        }
+
+        if to_type == Library::ENTITY_TYPE {
+            edges.depends_on.push(make_depends_on(from, to, created_at));
+            return;
+        }
+    }
+}
+
 fn make_contains(
     from: &NodeDescriptor,
     to: &NodeDescriptor,
@@ -841,6 +976,23 @@ fn make_contains(
 ) -> Contains {
     let base = edge_base(Contains::ENTITY_TYPE, from, to, created_at);
     Contains {
+        id: Some(base.id),
+        from_node_id: Some(base.from_node_id),
+        to_node_id: Some(base.to_node_id),
+        from_node_type: Some(base.from_node_type),
+        to_node_type: Some(base.to_node_type),
+        created_at: base.created_at,
+        updated_at: None,
+    }
+}
+
+fn make_depends_on(
+    from: &NodeDescriptor,
+    to: &NodeDescriptor,
+    created_at: DateTime<Utc>,
+) -> DependsOn {
+    let base = edge_base(DependsOn::ENTITY_TYPE, from, to, created_at);
+    DependsOn {
         id: Some(base.id),
         from_node_id: Some(base.from_node_id),
         to_node_id: Some(base.to_node_id),
