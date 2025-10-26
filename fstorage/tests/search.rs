@@ -1,8 +1,8 @@
 use fstorage::{
-    FStorage,
     fetch::{Fetchable, GraphData},
     schemas::generated_schemas::{Function, ReadmeChunk},
     sync::DataSynchronizer,
+    FStorage,
 };
 use heed3::RoTxn;
 use helix_db::helix_engine::traversal_core::ops::{g::G, vectors::insert::InsertVAdapter};
@@ -147,5 +147,56 @@ async fn hybrid_search_falls_back_to_bm25() -> anyhow::Result<()> {
         hits[0].node.is_some(),
         "expected hybrid search to surface node results when available"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn index_search_matches_uuid_prefixes() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let config = fstorage::config::StorageConfig::new(dir.path());
+    let storage = FStorage::new(config).await?;
+
+    let mut graph = GraphData::new();
+    graph.add_entities(vec![Function {
+        version_sha: Some("sha-prefix".to_string()),
+        file_path: Some("src/lib.rs".to_string()),
+        name: Some("function::lookup".to_string()),
+        signature: Some("fn lookup()".to_string()),
+        start_line: Some(1),
+        end_line: Some(2),
+        is_component: Some(false),
+    }]);
+    storage.synchronizer.process_graph_data(graph).await?;
+
+    let records = storage
+        .lake
+        .search_index_nodes(Function::ENTITY_TYPE, "function::lookup", 5)
+        .await?;
+    assert_eq!(
+        records.len(),
+        1,
+        "expected index search to find the function"
+    );
+    let id = records[0]
+        .get("id")
+        .and_then(|value| value.as_str())
+        .expect("index record should contain id");
+    assert!(
+        id.len() > 8,
+        "id length should exceed prefix length requirement"
+    );
+    let prefix = &id[..8];
+
+    let uuid_matches = storage
+        .lake
+        .search_index_nodes(Function::ENTITY_TYPE, prefix, 5)
+        .await?;
+    assert!(
+        uuid_matches
+            .iter()
+            .any(|row| row.get("id").and_then(|value| value.as_str()) == Some(id)),
+        "prefix search should return the record with matching id"
+    );
+
     Ok(())
 }

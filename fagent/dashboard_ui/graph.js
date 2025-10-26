@@ -7,6 +7,7 @@ const graphError = $("#graph-error");
 const graphLegend = $("#graph-legend");
 const graphDepthInput = $("#graph-depth");
 const graphNodeLimitInput = $("#graph-node-limit");
+const graphEdgeLimitInput = $("#graph-edge-limit");
 const graphEdgeTypesInput = $("#graph-edge-types");
 const loadButton = $("#graph-load");
 const typeFilterSelect = $("#graph-type-filter");
@@ -471,13 +472,14 @@ async function loadSubgraph({ startId, showError = true } = {}) {
     try {
         const depth = Number(graphDepthInput?.value) || 1;
         const nodeLimit = Number(graphNodeLimitInput?.value) || 150;
+        const edgeLimit = Number(graphEdgeLimitInput?.value) || 300;
         const edgeTypes = graphEdgeTypesInput?.value.trim();
 
         const params = new URLSearchParams();
         params.set("start_id", nodeId);
         params.set("depth", Math.max(0, Math.min(depth, 4)));
         params.set("node_limit", Math.min(Math.max(nodeLimit, 1), 300));
-        params.set("edge_limit", 300);
+        params.set("edge_limit", Math.min(Math.max(edgeLimit, 10), 1000));
         if (edgeTypes) params.set("edge_types", edgeTypes);
 
         const graphJson = await fetchJSON(`/api/graph/subgraph?${params.toString()}`);

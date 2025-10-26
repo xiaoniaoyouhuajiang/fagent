@@ -3,10 +3,6 @@ use crate::errors::{Result, StorageError};
 use crate::models::{ColumnSummary, HybridSearchHit, TableSummary, TextSearchHit, VectorSearchHit};
 use crate::utils;
 use chrono::{DateTime, Utc};
-use deltalake::DeltaTable;
-use deltalake::DeltaTableBuilder;
-use deltalake::ObjectStore;
-use deltalake::Path;
 use deltalake::arrow::array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
     TimestampMicrosecondArray, UInt32Array, UInt64Array,
@@ -19,10 +15,14 @@ use deltalake::datafusion::execution::context::{SessionConfig, SessionContext};
 use deltalake::kernel::Action;
 use deltalake::operations::DeltaOps;
 use deltalake::protocol::SaveMode;
+use deltalake::DeltaTable;
+use deltalake::DeltaTableBuilder;
+use deltalake::ObjectStore;
+use deltalake::Path;
 use heed3::RoTxn;
 use helix_db::helix_engine::bm25::bm25::BM25;
-use helix_db::helix_engine::storage_core::HelixGraphStorage;
 use helix_db::helix_engine::storage_core::storage_methods::StorageMethods;
+use helix_db::helix_engine::storage_core::HelixGraphStorage;
 use helix_db::helix_engine::traversal_core::HelixGraphEngine;
 use helix_db::helix_engine::types::{GraphError, VectorError};
 use helix_db::helix_engine::vector_core::hnsw::HNSW;
@@ -862,6 +862,7 @@ impl Lake {
         let mut seen_edges: HashSet<u128> = HashSet::new();
         let mut known_vector_nodes: HashSet<u128> = HashSet::new();
         let mut missing_vector_nodes: HashSet<u128> = HashSet::new();
+        let mut included_nodes: HashSet<u128> = HashSet::new();
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
 
@@ -909,11 +910,13 @@ impl Lake {
                 Err(other) => return Err(StorageError::from(other)),
             };
 
-            nodes.push(node_map);
+            if included_nodes.insert(node_key) {
+                nodes.push(node_map.clone());
+            }
             visited_nodes.insert(node_key);
 
             if node_cap != usize::MAX && nodes.len() >= node_cap {
-                break;
+                return Ok(Subgraph { nodes, edges });
             }
 
             if level >= depth {
@@ -951,44 +954,32 @@ impl Lake {
                     }
                 }
 
-                let neighbor_exists = if visited_nodes.contains(&next_node_id)
-                    || known_vector_nodes.contains(&next_node_id)
-                {
-                    true
-                } else if missing_vector_nodes.contains(&next_node_id) {
-                    false
-                } else {
-                    match self.engine.storage.get_node(&txn, &next_node_id) {
-                        Ok(_) => true,
-                        Err(GraphError::NodeNotFound) => {
-                            match self.engine.storage.vectors.get_vector(
-                                &txn,
-                                next_node_id,
-                                0,
-                                true,
-                            ) {
-                                Ok(_) => {
-                                    known_vector_nodes.insert(next_node_id);
-                                    true
-                                }
-                                Err(VectorError::VectorNotFound(_))
-                                | Err(VectorError::EntryPointNotFound) => {
-                                    missing_vector_nodes.insert(next_node_id);
-                                    false
-                                }
-                                Err(err) => return Err(StorageError::Graph(err.into())),
-                            }
-                        }
-                        Err(err) => return Err(StorageError::from(err)),
+                let mut neighbor_map: Option<HashMap<String, JsonValue>> = None;
+                if !included_nodes.contains(&next_node_id) {
+                    neighbor_map = self.load_node_map_for_id(
+                        &txn,
+                        next_node_id,
+                        &mut known_vector_nodes,
+                        &mut missing_vector_nodes,
+                    )?;
+                    if neighbor_map.is_none() {
+                        continue;
                     }
-                };
-
-                if !neighbor_exists {
+                } else if missing_vector_nodes.contains(&next_node_id) {
                     continue;
                 }
 
                 edges.push(Self::edge_to_map(edge));
                 seen_edges.insert(edge_id);
+
+                if let Some(map) = neighbor_map {
+                    if included_nodes.insert(next_node_id) {
+                        nodes.push(map);
+                    }
+                    if node_cap != usize::MAX && nodes.len() >= node_cap {
+                        return Ok(Subgraph { nodes, edges });
+                    }
+                }
 
                 if !visited_nodes.contains(&next_node_id) && level + 1 <= depth {
                     queue.push_back((next_node_id, level + 1));
@@ -1005,6 +996,40 @@ impl Lake {
         }
 
         Ok(Subgraph { nodes, edges })
+    }
+
+    fn load_node_map_for_id(
+        &self,
+        txn: &RoTxn,
+        node_id: u128,
+        known_vector_nodes: &mut HashSet<u128>,
+        missing_vector_nodes: &mut HashSet<u128>,
+    ) -> Result<Option<HashMap<String, JsonValue>>> {
+        match self.engine.storage.get_node(txn, &node_id) {
+            Ok(node) => Ok(Some(Self::node_to_map(node))),
+            Err(GraphError::NodeNotFound) => {
+                if missing_vector_nodes.contains(&node_id) {
+                    return Ok(None);
+                }
+                match self
+                    .engine
+                    .storage
+                    .vectors
+                    .get_vector(txn, node_id, 0, true)
+                {
+                    Ok(vector) => {
+                        known_vector_nodes.insert(node_id);
+                        Ok(Some(Self::vector_to_node_map(&vector)))
+                    }
+                    Err(VectorError::VectorNotFound(_)) | Err(VectorError::EntryPointNotFound) => {
+                        missing_vector_nodes.insert(node_id);
+                        Ok(None)
+                    }
+                    Err(err) => Err(StorageError::Graph(err.into())),
+                }
+            }
+            Err(err) => Err(StorageError::from(err)),
+        }
     }
 
     pub async fn query_table(
@@ -1074,15 +1099,20 @@ impl Lake {
         let schema = table.schema();
         let mut clauses = Vec::new();
         let mut has_updated_at = false;
-        let pattern = format!("%{}%", trimmed.to_lowercase());
-        let escaped_pattern = Self::escape_sql_literal(&pattern);
+        let lowered_query = trimmed.to_lowercase();
+        let text_pattern = format!("%{}%", lowered_query);
+        let escaped_text_pattern = Self::escape_sql_literal(&text_pattern);
+        let id_pattern = format!("%{}%", lowered_query);
+        let escaped_id_pattern = Self::escape_sql_literal(&id_pattern);
 
         for field in schema.fields() {
             match field.data_type() {
                 DataType::Utf8 | DataType::LargeUtf8 => {
-                    if field.name() != "id" {
-                        let identifier = Self::escape_sql_identifier(field.name());
-                        clauses.push(format!("LOWER({identifier}) LIKE '{escaped_pattern}'"));
+                    let identifier = Self::escape_sql_identifier(field.name());
+                    if field.name() == "id" {
+                        clauses.push(format!("LOWER({identifier}) LIKE '{escaped_id_pattern}'"));
+                    } else {
+                        clauses.push(format!("LOWER({identifier}) LIKE '{escaped_text_pattern}'"));
                     }
                 }
                 DataType::Timestamp(_, _) => {
