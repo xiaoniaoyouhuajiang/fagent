@@ -16,7 +16,7 @@ use deltalake::arrow::array::{
 };
 use deltalake::arrow::datatypes::{DataType, Field, Schema};
 use deltalake::arrow::record_batch::RecordBatch;
-use heed3::RoTxn;
+use heed3::{RoTxn, RwTxn};
 use helix_db::{
     helix_engine::{
         bm25::bm25::{BM25Flatten, BM25},
@@ -404,51 +404,61 @@ impl FStorageSynchronizer {
                         }
                     };
 
-                    if self.engine.storage.get_edge(&txn, &id_u128).is_ok() {
-                        let props_vec: Vec<(String, Value)> = properties.into_iter().collect();
-                        let traversal = G::new(self.engine.storage.clone(), &txn)
-                            .e_from_id(&id_u128)
-                            .collect_to::<Vec<_>>();
-                        G::new_mut_from(self.engine.storage.clone(), &mut txn, traversal)
-                            .update(Some(props_vec))
-                            .for_each(|_| {});
-                        log::debug!(
-                            "Updating edge: {} ({})",
-                            Uuid::from_u128(id_u128).to_string(),
-                            entity_type
-                        );
-                    } else {
-                        let edge = Edge {
-                            id: id_u128,
-                            label: entity_type.to_string(),
-                            version: self.engine.storage.version_info.get_latest(entity_type),
-                            properties: Some(properties),
-                            from_node: from_u128,
-                            to_node: to_u128,
-                        };
-
-                        let bytes = edge.encode_edge()?;
-                        self.engine
-                            .storage
-                            .edges_db
-                            .put(&mut txn, &id_u128, &bytes)?;
-
-                        let label_hash = hash_label(&edge.label, None);
-                        self.engine.storage.out_edges_db.put(
-                            &mut txn,
-                            &helix_db::helix_engine::storage_core::HelixGraphStorage::out_edge_key(&edge.from_node, &label_hash),
-                            &helix_db::helix_engine::storage_core::HelixGraphStorage::pack_edge_data(&edge.id, &edge.to_node),
-                        )?;
-                        self.engine.storage.in_edges_db.put(
-                            &mut txn,
-                            &helix_db::helix_engine::storage_core::HelixGraphStorage::in_edge_key(&edge.to_node, &label_hash),
-                            &helix_db::helix_engine::storage_core::HelixGraphStorage::pack_edge_data(&edge.id, &edge.from_node),
-                        )?;
-                        log::debug!(
-                            "Inserting edge: {} ({})",
-                            Uuid::from_u128(id_u128).to_string(),
-                            entity_type
-                        );
+                    match self.engine.storage.get_edge(&txn, &id_u128) {
+                        Ok(existing_edge) => {
+                            if existing_edge.from_node != from_u128
+                                || existing_edge.to_node != to_u128
+                            {
+                                self.engine
+                                    .storage
+                                    .drop_edge(&mut txn, &id_u128)
+                                    .map_err(|e| StorageError::SyncError(e.to_string()))?;
+                                self.insert_edge_into_engine(
+                                    &mut txn,
+                                    id_u128,
+                                    entity_type,
+                                    properties,
+                                    from_u128,
+                                    to_u128,
+                                )?;
+                                log::debug!(
+                                    "Rewriting edge: {} ({})",
+                                    Uuid::from_u128(id_u128).to_string(),
+                                    entity_type
+                                );
+                                continue;
+                            } else {
+                                let props_vec: Vec<(String, Value)> =
+                                    properties.into_iter().map(|(k, v)| (k, v)).collect();
+                                let traversal = G::new(self.engine.storage.clone(), &txn)
+                                    .e_from_id(&id_u128)
+                                    .collect_to::<Vec<_>>();
+                                G::new_mut_from(self.engine.storage.clone(), &mut txn, traversal)
+                                    .update(Some(props_vec))
+                                    .for_each(|_| {});
+                                log::debug!(
+                                    "Updating edge: {} ({})",
+                                    Uuid::from_u128(id_u128).to_string(),
+                                    entity_type
+                                );
+                                continue;
+                            }
+                        }
+                        Err(_) => {
+                            self.insert_edge_into_engine(
+                                &mut txn,
+                                id_u128,
+                                entity_type,
+                                properties,
+                                from_u128,
+                                to_u128,
+                            )?;
+                            log::debug!(
+                                "Inserting edge: {} ({})",
+                                Uuid::from_u128(id_u128).to_string(),
+                                entity_type
+                            );
+                        }
                     }
                 }
             }
@@ -750,7 +760,8 @@ impl FStorageSynchronizer {
                 .insert_v::<fn(&HVector, &RoTxn) -> bool>(&embedding_vec, entity_type, fields_opt)
                 .collect_to_obj();
             let vector_uuid = traversal.uuid();
-            vector_ids.push(Some(vector_uuid.clone()));
+            let vector_record_identity = existing_id.clone().unwrap_or_else(|| vector_uuid.clone());
+            vector_ids.push(Some(vector_record_identity.clone()));
 
             if entity_type == ReadmeChunk::ENTITY_TYPE {
                 if let Some(project_url) = project_url.clone() {
@@ -780,10 +791,11 @@ impl FStorageSynchronizer {
                     (source_node_id.clone(), source_node_key.clone())
                 {
                     if let Some(from_type) = extract_node_type_from_key(&node_key) {
+                        let edge_identity = vector_record_identity.clone();
                         let edge_id = utils::id::stable_edge_id_u128(
                             Embeds::ENTITY_TYPE,
                             &source_id,
-                            &vector_uuid,
+                            &edge_identity,
                         );
                         let edge_timestamp = row_created_at.clone();
                         embeds_edges.push(Embeds {
@@ -884,6 +896,53 @@ impl FStorageSynchronizer {
             self.update_engine_from_batch(Box::new(embeds_edges), &edge_batch)?;
         }
 
+        Ok(())
+    }
+
+    fn insert_edge_into_engine(
+        &self,
+        txn: &mut RwTxn<'_>,
+        id_u128: u128,
+        entity_type: &str,
+        properties: HashMap<String, Value>,
+        from_u128: u128,
+        to_u128: u128,
+    ) -> Result<()> {
+        let edge = Edge {
+            id: id_u128,
+            label: entity_type.to_string(),
+            version: self.engine.storage.version_info.get_latest(entity_type),
+            properties: Some(properties),
+            from_node: from_u128,
+            to_node: to_u128,
+        };
+
+        let bytes = edge.encode_edge()?;
+        self.engine.storage.edges_db.put(txn, &id_u128, &bytes)?;
+
+        let label_hash = hash_label(&edge.label, None);
+        self.engine.storage.out_edges_db.put(
+            txn,
+            &helix_db::helix_engine::storage_core::HelixGraphStorage::out_edge_key(
+                &edge.from_node,
+                &label_hash,
+            ),
+            &helix_db::helix_engine::storage_core::HelixGraphStorage::pack_edge_data(
+                &edge.id,
+                &edge.to_node,
+            ),
+        )?;
+        self.engine.storage.in_edges_db.put(
+            txn,
+            &helix_db::helix_engine::storage_core::HelixGraphStorage::in_edge_key(
+                &edge.to_node,
+                &label_hash,
+            ),
+            &helix_db::helix_engine::storage_core::HelixGraphStorage::pack_edge_data(
+                &edge.id,
+                &edge.from_node,
+            ),
+        )?;
         Ok(())
     }
 }

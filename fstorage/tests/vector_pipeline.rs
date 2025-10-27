@@ -1,9 +1,13 @@
 use chrono::Utc;
-use deltalake::open_table;
+use deltalake::{
+    datafusion::{datasource::TableProvider, execution::context::SessionContext},
+    open_table,
+};
 use fstorage::{
     fetch::{EntityCategory, Fetchable},
-    schemas::generated_schemas::{Project, ReadmeChunk},
+    schemas::generated_schemas::{CodeChunk, Function, Project, ReadmeChunk},
     sync::DataSynchronizer,
+    utils,
 };
 use heed3::RoTxn;
 use helix_db::{
@@ -15,7 +19,9 @@ use helix_db::{
         vector_core::vector::HVector,
     },
 };
+use std::{path::PathBuf, sync::Arc};
 use url::Url;
+use uuid::Uuid;
 
 mod common;
 
@@ -109,4 +115,147 @@ async fn vector_pipeline_persists_to_lake_and_engine() -> anyhow::Result<()> {
     );
 
     Ok(())
+}
+
+#[tokio::test]
+async fn embeds_edges_are_idempotent() -> anyhow::Result<()> {
+    let ctx = common::init_test_context().await?;
+
+    let version_sha = "deadbeef".to_string();
+    let file_path = "src/lib.rs".to_string();
+    let function_name = "handle_request".to_string();
+    let function = Function {
+        version_sha: Some(version_sha.clone()),
+        file_path: Some(file_path.clone()),
+        name: Some(function_name.clone()),
+        signature: Some("fn handle_request()".to_string()),
+        start_line: Some(5),
+        end_line: Some(20),
+        is_component: Some(false),
+    };
+    let function_id_u128 = utils::id::stable_node_id_u128(
+        Function::ENTITY_TYPE,
+        &[
+            ("version_sha", version_sha.clone()),
+            ("file_path", file_path.clone()),
+            ("name", function_name.clone()),
+        ],
+    );
+    let function_id = Uuid::from_u128(function_id_u128).to_string();
+
+    let project_url = "https://github.com/example/repo-code".to_string();
+    let source_node_key = format!(
+        "{}::{}::{}::{}",
+        Function::ENTITY_TYPE,
+        version_sha,
+        file_path,
+        function_name
+    );
+
+    let mut graph = fstorage::fetch::GraphData::new();
+    graph.add_entities(vec![function.clone()]);
+    graph.add_entities(vec![build_code_chunk(
+        &function_id,
+        &source_node_key,
+        &project_url,
+        &version_sha,
+        &file_path,
+        "fn handle_request() {}".to_string(),
+        vec![0.2, 0.3, 0.5],
+        0,
+    )]);
+
+    ctx.synchronizer.process_graph_data(graph).await?;
+    assert_eq!(
+        embeds_neighbor_count(&ctx, function_id_u128)?,
+        1,
+        "initial embeds edge count"
+    );
+
+    let mut second_graph = fstorage::fetch::GraphData::new();
+    second_graph.add_entities(vec![function]);
+    second_graph.add_entities(vec![build_code_chunk(
+        &function_id,
+        &source_node_key,
+        &project_url,
+        &version_sha,
+        &file_path,
+        "fn handle_request() { println!(\"updated\"); }".to_string(),
+        vec![0.9, 0.1, 0.4],
+        0,
+    )]);
+
+    ctx.synchronizer.process_graph_data(second_graph).await?;
+    assert_eq!(
+        embeds_neighbor_count(&ctx, function_id_u128)?,
+        1,
+        "embeds edges remain single after re-sync"
+    );
+
+    let embeds_path = ctx.config.lake_path.join("silver/edges/embeds");
+    assert_eq!(
+        delta_row_count(embeds_path).await?,
+        1,
+        "delta table keeps single embeds row"
+    );
+
+    Ok(())
+}
+
+fn build_code_chunk(
+    function_id: &str,
+    source_node_key: &str,
+    project_url: &str,
+    version_sha: &str,
+    file_path: &str,
+    text: String,
+    embedding: Vec<f32>,
+    chunk_order: i32,
+) -> CodeChunk {
+    let chunk_id = Uuid::from_u128(utils::id::stable_node_id_u128(
+        CodeChunk::ENTITY_TYPE,
+        &[
+            ("source_node_id", function_id.to_string()),
+            ("chunk_order", chunk_order.to_string()),
+        ],
+    ))
+    .to_string();
+
+    CodeChunk {
+        id: Some(chunk_id),
+        project_url: Some(project_url.to_string()),
+        revision_sha: Some(version_sha.to_string()),
+        source_file: Some(file_path.to_string()),
+        source_node_key: Some(source_node_key.to_string()),
+        source_node_id: Some(function_id.to_string()),
+        language: Some("rust".to_string()),
+        text: Some(text),
+        embedding: Some(embedding),
+        embedding_model: Some("fixture-code".to_string()),
+        embedding_id: Some(format!("{source_node_key}::{}", chunk_order)),
+        token_count: Some(16),
+        chunk_order: Some(chunk_order),
+        created_at: Some(Utc::now()),
+        updated_at: None,
+    }
+}
+
+fn embeds_neighbor_count(ctx: &common::TestContext, function_id: u128) -> anyhow::Result<usize> {
+    let txn = ctx.engine.storage.graph_env.read_txn()?;
+    let neighbors = G::new(ctx.engine.storage.clone(), &txn)
+        .n_from_id(&function_id)
+        .out("edge_embeds", &EdgeType::Vec)
+        .collect_to::<Vec<_>>();
+    Ok(neighbors.len())
+}
+
+async fn delta_row_count(path: PathBuf) -> anyhow::Result<usize> {
+    let url =
+        Url::from_file_path(&path).map_err(|_| anyhow::anyhow!("non-UTF8 path {:?}", path))?;
+    let table = open_table(url).await?;
+    let ctx = SessionContext::new();
+    let provider: Arc<dyn TableProvider> = Arc::new(table);
+    let df = ctx.read_table(provider)?;
+    let batches = df.collect().await?;
+    Ok(batches.iter().map(|batch| batch.num_rows()).sum())
 }
