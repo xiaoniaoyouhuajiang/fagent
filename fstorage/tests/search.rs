@@ -1,8 +1,8 @@
 use fstorage::{
+    FStorage,
     fetch::{Fetchable, GraphData},
     schemas::generated_schemas::{Function, ReadmeChunk},
     sync::DataSynchronizer,
-    FStorage,
 };
 use heed3::RoTxn;
 use helix_db::helix_engine::traversal_core::ops::{g::G, vectors::insert::InsertVAdapter};

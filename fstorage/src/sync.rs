@@ -6,7 +6,7 @@ use crate::fetch::{
 };
 use crate::lake::Lake;
 use crate::models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext};
-use crate::schemas::generated_schemas::{ContainsContent, Project, ReadmeChunk};
+use crate::schemas::generated_schemas::{CodeChunk, ContainsContent, Embeds, Project, ReadmeChunk};
 use crate::utils;
 use async_trait::async_trait;
 use bincode;
@@ -19,10 +19,9 @@ use deltalake::arrow::record_batch::RecordBatch;
 use heed3::RoTxn;
 use helix_db::{
     helix_engine::{
-        bm25::bm25::{BM25, BM25Flatten},
+        bm25::bm25::{BM25Flatten, BM25},
         storage_core::storage_methods::StorageMethods,
         traversal_core::{
-            HelixGraphEngine,
             ops::{
                 g::G,
                 source::{e_from_id::EFromIdAdapter, n_from_id::NFromIdAdapter},
@@ -30,6 +29,7 @@ use helix_db::{
                 vectors::insert::InsertVAdapter,
             },
             traversal_value::Traversable,
+            HelixGraphEngine,
         },
         vector_core::vector::HVector,
     },
@@ -617,6 +617,7 @@ impl FStorageSynchronizer {
 
         let mut vector_ids: Vec<Option<String>> = Vec::with_capacity(num_rows);
         let mut contains_content_edges: Vec<ContainsContent> = Vec::new();
+        let mut embeds_edges: Vec<Embeds> = Vec::new();
 
         let mut txn = self.engine.storage.graph_env.write_txn()?;
 
@@ -625,6 +626,8 @@ impl FStorageSynchronizer {
             let mut embedding: Option<Vec<f64>> = None;
             let mut project_url: Option<String> = None;
             let mut row_created_at: Option<DateTime<Utc>> = None;
+            let mut source_node_id: Option<String> = None;
+            let mut source_node_key: Option<String> = None;
 
             let existing_id = id_idx.and_then(|idx| {
                 columns[idx]
@@ -687,6 +690,24 @@ impl FStorageSynchronizer {
                                     field.name().clone(),
                                     Value::String(arr.value(row).to_string()),
                                 );
+                            }
+                        }
+                    }
+                    "source_node_id" => {
+                        if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
+                            if !arr.is_null(row) {
+                                let value = arr.value(row).to_string();
+                                source_node_id = Some(value.clone());
+                                properties.insert(field.name().clone(), Value::String(value));
+                            }
+                        }
+                    }
+                    "source_node_key" => {
+                        if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
+                            if !arr.is_null(row) {
+                                let value = arr.value(row).to_string();
+                                source_node_key = Some(value.clone());
+                                properties.insert(field.name().clone(), Value::String(value));
                             }
                         }
                     }
@@ -754,6 +775,38 @@ impl FStorageSynchronizer {
                         updated_at: edge_timestamp,
                     });
                 }
+            } else if entity_type == CodeChunk::ENTITY_TYPE {
+                if let (Some(source_id), Some(node_key)) =
+                    (source_node_id.clone(), source_node_key.clone())
+                {
+                    if let Some(from_type) = extract_node_type_from_key(&node_key) {
+                        let edge_id = utils::id::stable_edge_id_u128(
+                            Embeds::ENTITY_TYPE,
+                            &source_id,
+                            &vector_uuid,
+                        );
+                        let edge_timestamp = row_created_at.clone();
+                        embeds_edges.push(Embeds {
+                            id: Some(Uuid::from_u128(edge_id).to_string()),
+                            from_node_id: Some(source_id),
+                            to_node_id: Some(vector_uuid.clone()),
+                            from_node_type: Some(from_type.to_string()),
+                            to_node_type: Some(CodeChunk::ENTITY_TYPE.to_string()),
+                            created_at: edge_timestamp.clone(),
+                            updated_at: edge_timestamp,
+                        });
+                    } else {
+                        log::warn!(
+                            "Unable to derive source node type from key '{}' for CodeChunk vector",
+                            node_key
+                        );
+                    }
+                } else {
+                    log::warn!(
+                        "Missing source node identifiers for CodeChunk vector row {}, skipping edge",
+                        row
+                    );
+                }
             }
         }
 
@@ -804,6 +857,31 @@ impl FStorageSynchronizer {
                 &vec!["id".to_string()],
             )?;
             self.update_engine_from_batch(Box::new(contains_content_edges), &edge_batch)?;
+        }
+
+        if !embeds_edges.is_empty() {
+            let edge_batch = Embeds::to_record_batch(embeds_edges.clone())?;
+            let edge_table = format!(
+                "silver/edges/{}",
+                Embeds::ENTITY_TYPE
+                    .strip_prefix("edge_")
+                    .unwrap_or(Embeds::ENTITY_TYPE)
+                    .to_lowercase()
+            );
+            self.lake
+                .write_batches(
+                    &edge_table,
+                    vec![edge_batch.clone()],
+                    Some(vec!["id".to_string()]),
+                )
+                .await?;
+            self.catalog.ensure_ingestion_offset(
+                &edge_table,
+                Embeds::ENTITY_TYPE,
+                crate::fetch::EntityCategory::Edge,
+                &vec!["id".to_string()],
+            )?;
+            self.update_engine_from_batch(Box::new(embeds_edges), &edge_batch)?;
         }
 
         Ok(())
@@ -1133,6 +1211,12 @@ impl DataSynchronizer for FStorageSynchronizer {
             .update_task_log_status(task_id, "SUCCESS", &status_message)?;
         Ok(())
     }
+}
+
+fn extract_node_type_from_key(key: &str) -> Option<&str> {
+    key.splitn(2, "::")
+        .next()
+        .filter(|segment| !segment.is_empty())
 }
 
 #[cfg(test)]

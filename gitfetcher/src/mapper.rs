@@ -15,9 +15,9 @@ use fstorage::{
     fetch::Fetchable,
     fetch::GraphData,
     schemas::generated_schemas::{
-        Calls, Class, Commit, Contains, DataModel, DependsOn, Endpoint, File, Function, Handler,
-        HasVersion, Implements, Imports, IsCommit, Library, NestedIn, Operand, ParentOf, Project,
-        ReadmeChunk, Test, Trait, Uses, Variable, Version,
+        Calls, Class, CodeChunk, Commit, Contains, DataModel, DependsOn, Endpoint, File, Function,
+        Handler, HasVersion, Implements, Imports, IsCommit, Library, NestedIn, Operand, ParentOf,
+        Project, ReadmeChunk, Test, Trait, Uses, Variable, Version,
     },
     utils::id::{stable_edge_id_u128, stable_node_id_u128},
 };
@@ -160,7 +160,15 @@ pub async fn build_repo_snapshot_graph(
     }
 
     if params.include_code {
-        append_code_graph(&mut graph, snapshot, &version_node_id).await?;
+        append_code_graph(
+            &mut graph,
+            snapshot,
+            &version_node_id,
+            &project_url,
+            &repo.full_name,
+            embedding_provider.clone(),
+        )
+        .await?;
     }
 
     Ok(graph)
@@ -170,6 +178,9 @@ async fn append_code_graph(
     graph: &mut GraphData,
     snapshot: &RepoSnapshot,
     version_node_id: &str,
+    project_url: &str,
+    repo_full_name: &str,
+    embedding_provider: Arc<dyn EmbeddingProvider>,
 ) -> StorageResult<()> {
     let repo = &snapshot.repository;
     let clone_source = repo_clone_source(repo);
@@ -184,6 +195,7 @@ async fn append_code_graph(
     let code_graph = workspace.build_graph().await?;
     let version_descriptor = NodeDescriptor::new(Version::ENTITY_TYPE, version_node_id.to_string());
     let repo_root = workspace.repo_root();
+    let mut code_chunk_sources = Vec::new();
     translate_ast_graph(
         graph,
         &code_graph,
@@ -191,7 +203,18 @@ async fn append_code_graph(
         &snapshot.revision.sha,
         &version_descriptor,
         repo_root,
+        &mut code_chunk_sources,
     )?;
+    emit_code_chunks(
+        graph,
+        &code_chunk_sources,
+        project_url,
+        repo_full_name,
+        &snapshot.revision.sha,
+        snapshot.commit.authored_at,
+        embedding_provider,
+    )
+    .await?;
     Ok(())
 }
 
@@ -221,6 +244,24 @@ impl NodeDescriptor {
             node_id,
         }
     }
+
+    fn entity_type(&self) -> &'static str {
+        self.entity_type
+    }
+
+    fn node_id(&self) -> &str {
+        &self.node_id
+    }
+}
+
+#[derive(Clone)]
+struct CodeChunkSource {
+    descriptor: NodeDescriptor,
+    version_sha: String,
+    file_path: String,
+    language: Option<String>,
+    node_data: NodeData,
+    chunk_order: usize,
 }
 
 #[derive(Default)]
@@ -336,6 +377,7 @@ fn translate_ast_graph(
     version_sha: &str,
     version_descriptor: &NodeDescriptor,
     repo_root: &Path,
+    code_chunk_sources: &mut Vec<CodeChunkSource>,
 ) -> StorageResult<()> {
     let mut descriptors: HashMap<String, NodeDescriptor> = HashMap::new();
     let mut nodes = NodeBuckets::default();
@@ -348,7 +390,17 @@ fn translate_ast_graph(
                     nodes.files.push(value);
                 }
                 MappedNode::Class(value, descriptor) => {
-                    descriptors.insert(key.clone(), descriptor);
+                    descriptors.insert(key.clone(), descriptor.clone());
+                    if let Some(file_path) = value.file_path.clone() {
+                        code_chunk_sources.push(CodeChunkSource {
+                            descriptor,
+                            version_sha: version_sha.to_string(),
+                            file_path,
+                            language: meta_value(&node.node_data, "language"),
+                            node_data: node.node_data.clone(),
+                            chunk_order: 0,
+                        });
+                    }
                     nodes.classes.push(value);
                 }
                 MappedNode::Trait(value, descriptor) => {
@@ -356,7 +408,17 @@ fn translate_ast_graph(
                     nodes.traits.push(value);
                 }
                 MappedNode::Function(value, descriptor) => {
-                    descriptors.insert(key.clone(), descriptor);
+                    descriptors.insert(key.clone(), descriptor.clone());
+                    if let Some(file_path) = value.file_path.clone() {
+                        code_chunk_sources.push(CodeChunkSource {
+                            descriptor,
+                            version_sha: version_sha.to_string(),
+                            file_path,
+                            language: meta_value(&node.node_data, "language"),
+                            node_data: node.node_data.clone(),
+                            chunk_order: 0,
+                        });
+                    }
                     nodes.functions.push(value);
                 }
                 MappedNode::DataModel(value, descriptor) => {
@@ -454,6 +516,102 @@ fn translate_ast_graph(
     Ok(())
 }
 
+async fn emit_code_chunks(
+    graph: &mut GraphData,
+    sources: &[CodeChunkSource],
+    project_url: &str,
+    repo_full_name: &str,
+    revision_sha: &str,
+    commit_ts: DateTime<Utc>,
+    embedding_provider: Arc<dyn EmbeddingProvider>,
+) -> StorageResult<()> {
+    if sources.is_empty() {
+        return Ok(());
+    }
+
+    let mut prepared = Vec::new();
+    let project_url = project_url.to_string();
+    let revision_sha = revision_sha.to_string();
+    let repo_full_name = repo_full_name.to_string();
+    for source in sources {
+        let text = source.node_data.body.trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        if source.file_path.is_empty() {
+            continue;
+        }
+        prepared.push((source.clone(), text));
+    }
+
+    if prepared.is_empty() {
+        return Ok(());
+    }
+
+    let texts: Vec<String> = prepared.iter().map(|(_, text)| text.clone()).collect();
+    let embeddings_f64 = embedding_provider.embed(texts.clone()).await?;
+    if embeddings_f64.len() != texts.len() {
+        return Err(StorageError::SyncError(
+            "Embedding count mismatch for code chunks".into(),
+        ));
+    }
+    let embedding_model = detect_embedding_model_from_env();
+
+    let mut code_chunks = Vec::with_capacity(prepared.len());
+    for ((source, text), embedding_vec) in prepared.into_iter().zip(embeddings_f64.into_iter()) {
+        let embedding: Vec<f32> = embedding_vec
+            .into_iter()
+            .map(|value| value as f32)
+            .collect();
+        let embedding = if embedding.is_empty() {
+            None
+        } else {
+            Some(embedding)
+        };
+
+        let chunk_id = code_chunk_uuid(source.descriptor.node_id(), source.chunk_order);
+        let embedding_id = code_chunk_embedding_identifier(
+            &repo_full_name,
+            &revision_sha,
+            source.descriptor.node_id(),
+            source.chunk_order,
+        );
+        let source_node_key = build_source_node_key(
+            source.descriptor.entity_type(),
+            &source.version_sha,
+            &source.file_path,
+            &source.node_data.name,
+        );
+
+        let token_count = approximate_token_count(&text);
+        let embedding_model_value = embedding.as_ref().and_then(|_| embedding_model.clone());
+        let chunk = CodeChunk {
+            id: Some(chunk_id),
+            project_url: Some(project_url.clone()),
+            revision_sha: Some(revision_sha.clone()),
+            source_file: Some(source.file_path.clone()),
+            source_node_key: Some(source_node_key),
+            source_node_id: Some(source.descriptor.node_id().to_string()),
+            language: source.language.clone(),
+            text: Some(text),
+            embedding,
+            embedding_model: embedding_model_value,
+            embedding_id: Some(embedding_id),
+            token_count,
+            chunk_order: Some(source.chunk_order as i32),
+            created_at: Some(commit_ts),
+            updated_at: None,
+        };
+        code_chunks.push(chunk);
+    }
+
+    if !code_chunks.is_empty() {
+        graph.add_entities(code_chunks);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +681,7 @@ mod tests {
             "deadbeef",
             &version_descriptor,
             Path::new("/dummy/repo"),
+            &mut Vec::new(),
         )
         .expect("translate");
 
@@ -1142,6 +1301,40 @@ fn embedding_identifier(
     );
     let uuid = Uuid::new_v5(&Uuid::NAMESPACE_URL, source.as_bytes());
     uuid.to_string()
+}
+
+fn code_chunk_embedding_identifier(
+    repo_full_name: &str,
+    revision_sha: &str,
+    source_node_id: &str,
+    chunk_order: usize,
+) -> String {
+    let source = format!(
+        "code|{}|{}|{}|{}",
+        repo_full_name, revision_sha, source_node_id, chunk_order
+    );
+    let uuid = Uuid::new_v5(&Uuid::NAMESPACE_URL, source.as_bytes());
+    uuid.to_string()
+}
+
+fn code_chunk_uuid(source_node_id: &str, chunk_order: usize) -> String {
+    let id = stable_node_id_u128(
+        CodeChunk::ENTITY_TYPE,
+        &[
+            ("source_node_id", source_node_id.to_string()),
+            ("chunk_order", chunk_order.to_string()),
+        ],
+    );
+    Uuid::from_u128(id).to_string()
+}
+
+fn build_source_node_key(
+    entity_type: &str,
+    version_sha: &str,
+    file_path: &str,
+    node_name: &str,
+) -> String {
+    format!("{entity_type}::{version_sha}::{file_path}::{node_name}")
 }
 
 fn approximate_token_count(text: &str) -> Option<i32> {

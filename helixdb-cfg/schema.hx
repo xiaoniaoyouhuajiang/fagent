@@ -154,6 +154,9 @@ schema::4 {
     // Represents an embedding of a code entity's body/documentation
     V::CODE_CHUNK {
         id: String,
+        project_url: String,
+        revision_sha: String,
+        source_file: String,
         source_node_key: String,    // Unique key of the source N::FUNCTION or N::CLASS
         source_node_id: String,
         language: String,
