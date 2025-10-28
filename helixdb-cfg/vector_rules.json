@@ -1,0 +1,44 @@
+{
+  "vectors": [
+    {
+      "vector_entity": "readmechunk",
+      "edges": [
+        {
+          "edge_type": "edge_containscontent",
+          "target_node_type": "readmechunk",
+          "source": {
+            "kind": "primary_key",
+            "entity_type": "project",
+            "mappings": [
+              {
+                "vector_column": "project_url",
+                "primary_key": "url"
+              }
+            ]
+          },
+          "source_node_type": {
+            "kind": "literal",
+            "value": "project"
+          }
+        }
+      ]
+    },
+    {
+      "vector_entity": "codechunk",
+      "edges": [
+        {
+          "edge_type": "edge_embeds",
+          "target_node_type": "codechunk",
+          "source": {
+            "kind": "direct_column",
+            "column": "source_node_id"
+          },
+          "source_node_type": {
+            "kind": "from_key",
+            "column": "source_node_key"
+          }
+        }
+      ]
+    }
+  ]
+}

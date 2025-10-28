@@ -2995,6 +2995,7 @@ dependencies = [
  "heed3",
  "helix-db 1.0.138",
  "log",
+ "once_cell",
  "reqwest 0.12.23",
  "rusqlite",
  "rustworkx-core",

@@ -2,11 +2,13 @@ use crate::auto_fetchable;
 use crate::catalog::Catalog;
 use crate::errors::{Result, StorageError};
 use crate::fetch::{
-    EntityCategory, FetchResponse, Fetchable, Fetcher, FetcherCapability, GraphData, ProbeReport,
+    EntityCategory, FetchResponse, Fetcher, FetcherCapability, GraphData, ProbeReport,
 };
 use crate::lake::Lake;
 use crate::models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext};
-use crate::schemas::generated_schemas::{CodeChunk, ContainsContent, Embeds, Project, ReadmeChunk};
+use crate::schema_registry::{
+    vector_rules, SourceNodeId, SourceNodeType, SCHEMA_REGISTRY,
+};
 use crate::utils;
 use async_trait::async_trait;
 use bincode;
@@ -84,6 +86,17 @@ pub struct FStorageSynchronizer {
     embedding_provider: Arc<dyn EmbeddingProvider>,
 }
 
+#[derive(Debug, Clone)]
+struct EdgeWrite {
+    id: Option<String>,
+    from_node_id: Option<String>,
+    to_node_id: Option<String>,
+    from_node_type: Option<String>,
+    to_node_type: Option<String>,
+    created_at: Option<DateTime<Utc>>,
+    updated_at: Option<DateTime<Utc>>,
+}
+
 impl FStorageSynchronizer {
     pub fn new(
         catalog: Arc<Catalog>,
@@ -98,6 +111,196 @@ impl FStorageSynchronizer {
             fetchers: RwLock::new(HashMap::new()),
             embedding_provider,
         }
+    }
+
+    fn string_from_columns(
+        columns: &[Arc<dyn deltalake::arrow::array::Array>],
+        column_index: &HashMap<String, usize>,
+        column: &str,
+        row: usize,
+    ) -> Option<String> {
+        column_index.get(column).and_then(|idx| {
+            columns[*idx]
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .and_then(|arr| {
+                    if arr.is_null(row) {
+                        None
+                    } else {
+                        Some(arr.value(row).to_string())
+                    }
+                })
+        })
+    }
+
+    fn resolve_vector_rule(
+        rule: &crate::schema_registry::VectorEdgeRule,
+        columns: &[Arc<dyn deltalake::arrow::array::Array>],
+        column_index: &HashMap<String, usize>,
+        row: usize,
+        row_created_at: Option<DateTime<Utc>>,
+        vector_uuid: &str,
+        vector_identity: &str,
+    ) -> Result<Option<EdgeWrite>> {
+        let (from_node_id, from_node_type) = match &rule.source {
+            SourceNodeId::PrimaryKey {
+                entity_type: src_entity,
+                mappings,
+            } => {
+                let mut key_pairs: Vec<(&'static str, String)> = Vec::new();
+                for mapping in mappings {
+                    let Some(value) =
+                        Self::string_from_columns(columns, column_index, mapping.vector_column, row)
+                    else {
+                        log::warn!(
+                            "Vector edge '{}' skipped: column '{}' missing on row {}",
+                            rule.edge_type,
+                            mapping.vector_column,
+                            row
+                        );
+                        return Ok(None);
+                    };
+                    key_pairs.push((mapping.primary_key, value));
+                }
+                if key_pairs.is_empty() {
+                    return Ok(None);
+                }
+                let node_id = Uuid::from_u128(utils::id::stable_node_id_u128(
+                    src_entity,
+                    &key_pairs,
+                ))
+                .to_string();
+                let from_type = match &rule.source_node_type {
+                    SourceNodeType::Literal(value) => value.to_string(),
+                    SourceNodeType::FromKeyPattern(column) => {
+                        let Some(key_value) =
+                            Self::string_from_columns(columns, column_index, column, row)
+                        else {
+                            log::warn!(
+                                "Missing key column '{}' while deriving node type for edge '{}'",
+                                column,
+                                rule.edge_type
+                            );
+                            return Ok(None);
+                        };
+                        if let Some(prefix) = extract_node_type_from_key(&key_value) {
+                            prefix.to_string()
+                        } else {
+                            log::warn!(
+                                "Unable to parse node type from key '{}' for edge '{}'",
+                                key_value,
+                                rule.edge_type
+                            );
+                            return Ok(None);
+                        }
+                    }
+                };
+                (node_id, from_type)
+            }
+            SourceNodeId::DirectColumn { column } => {
+                let Some(node_id) =
+                    Self::string_from_columns(columns, column_index, column, row)
+                else {
+                    log::warn!(
+                        "Vector edge '{}' skipped: source id column '{}' missing on row {}",
+                        rule.edge_type,
+                        column,
+                        row
+                    );
+                    return Ok(None);
+                };
+                let from_type = match &rule.source_node_type {
+                    SourceNodeType::Literal(value) => value.to_string(),
+                    SourceNodeType::FromKeyPattern(column) => {
+                        let Some(key_value) =
+                            Self::string_from_columns(columns, column_index, column, row)
+                        else {
+                            log::warn!(
+                                "Missing key column '{}' while deriving node type for edge '{}'",
+                                column,
+                                rule.edge_type
+                            );
+                            return Ok(None);
+                        };
+                        if let Some(prefix) = extract_node_type_from_key(&key_value) {
+                            prefix.to_string()
+                        } else {
+                            log::warn!(
+                                "Unable to parse node type from key '{}' for edge '{}'",
+                                key_value,
+                                rule.edge_type
+                            );
+                            return Ok(None);
+                        }
+                    }
+                };
+                (node_id, from_type)
+            }
+        };
+
+        let edge_id = utils::id::stable_edge_id_u128(rule.edge_type, &from_node_id, vector_identity);
+        Ok(Some(EdgeWrite {
+            id: Some(Uuid::from_u128(edge_id).to_string()),
+            from_node_id: Some(from_node_id),
+            to_node_id: Some(vector_uuid.to_string()),
+            from_node_type: Some(from_node_type),
+            to_node_type: Some(rule.target_node_type.to_string()),
+            created_at: row_created_at,
+            updated_at: row_created_at,
+        }))
+    }
+
+    fn build_edge_record_batch(edges: &[EdgeWrite]) -> Result<RecordBatch> {
+        let ids: Vec<Option<String>> = edges.iter().map(|edge| edge.id.clone()).collect();
+        let from_ids: Vec<Option<String>> =
+            edges.iter().map(|edge| edge.from_node_id.clone()).collect();
+        let to_ids: Vec<Option<String>> =
+            edges.iter().map(|edge| edge.to_node_id.clone()).collect();
+        let from_types: Vec<Option<String>> =
+            edges.iter().map(|edge| edge.from_node_type.clone()).collect();
+        let to_types: Vec<Option<String>> =
+            edges.iter().map(|edge| edge.to_node_type.clone()).collect();
+        let created_at: Vec<Option<DateTime<Utc>>> =
+            edges.iter().map(|edge| edge.created_at).collect();
+        let updated_at: Vec<Option<DateTime<Utc>>> =
+            edges.iter().map(|edge| edge.updated_at).collect();
+
+        let fields = vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("from_node_id", DataType::Utf8, true),
+            Field::new("to_node_id", DataType::Utf8, true),
+            Field::new("from_node_type", DataType::Utf8, true),
+            Field::new("to_node_type", DataType::Utf8, true),
+            Field::new(
+                "created_at",
+                DataType::Timestamp(
+                    deltalake::arrow::datatypes::TimeUnit::Microsecond,
+                    Some("UTC".into()),
+                ),
+                true,
+            ),
+            Field::new(
+                "updated_at",
+                DataType::Timestamp(
+                    deltalake::arrow::datatypes::TimeUnit::Microsecond,
+                    Some("UTC".into()),
+                ),
+                true,
+            ),
+        ];
+
+        let arrays = vec![
+            auto_fetchable::to_arrow_array(ids)?,
+            auto_fetchable::to_arrow_array(from_ids)?,
+            auto_fetchable::to_arrow_array(to_ids)?,
+            auto_fetchable::to_arrow_array(from_types)?,
+            auto_fetchable::to_arrow_array(to_types)?,
+            auto_fetchable::to_arrow_array(created_at)?,
+            auto_fetchable::to_arrow_array(updated_at)?,
+        ];
+
+        let schema = Schema::new(fields);
+        Ok(RecordBatch::try_new(Arc::new(schema), arrays)?)
     }
 
     /// HOT PATH HELPER: Converts a value from an Arrow Array at a given index to a HelixDB Value.
@@ -620,24 +823,36 @@ impl FStorageSynchronizer {
             return Ok(());
         }
 
+        // Ensure the entity is known within the registry for consistent metadata.
+        let _vector_meta = SCHEMA_REGISTRY
+            .entity(entity_type)
+            .ok_or_else(|| {
+                StorageError::InvalidArg(format!(
+                    "Vector entity type '{}' is not registered in schema metadata",
+                    entity_type
+                ))
+            })?;
+
+        let rules = vector_rules(entity_type);
+
         let id_idx = schema.column_with_name("id").map(|(idx, _)| idx);
         let created_at_idx = schema.column_with_name("created_at").map(|(idx, _)| idx);
 
         let columns = record_batch.columns();
+        let mut column_index: HashMap<String, usize> = HashMap::new();
+        for (idx, field) in schema.fields().iter().enumerate() {
+            column_index.insert(field.name().clone(), idx);
+        }
 
         let mut vector_ids: Vec<Option<String>> = Vec::with_capacity(num_rows);
-        let mut contains_content_edges: Vec<ContainsContent> = Vec::new();
-        let mut embeds_edges: Vec<Embeds> = Vec::new();
+        let mut edges_by_type: HashMap<String, Vec<EdgeWrite>> = HashMap::new();
 
         let mut txn = self.engine.storage.graph_env.write_txn()?;
 
         for row in 0..num_rows {
             let mut properties = HashMap::new();
             let mut embedding: Option<Vec<f64>> = None;
-            let mut project_url: Option<String> = None;
             let mut row_created_at: Option<DateTime<Utc>> = None;
-            let mut source_node_id: Option<String> = None;
-            let mut source_node_key: Option<String> = None;
 
             let existing_id = id_idx.and_then(|idx| {
                 columns[idx]
@@ -692,35 +907,6 @@ impl FStorageSynchronizer {
                     "id" => {
                         // handled separately
                     }
-                    "project_url" => {
-                        if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
-                            if !arr.is_null(row) {
-                                project_url = Some(arr.value(row).to_string());
-                                properties.insert(
-                                    field.name().clone(),
-                                    Value::String(arr.value(row).to_string()),
-                                );
-                            }
-                        }
-                    }
-                    "source_node_id" => {
-                        if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
-                            if !arr.is_null(row) {
-                                let value = arr.value(row).to_string();
-                                source_node_id = Some(value.clone());
-                                properties.insert(field.name().clone(), Value::String(value));
-                            }
-                        }
-                    }
-                    "source_node_key" => {
-                        if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
-                            if !arr.is_null(row) {
-                                let value = arr.value(row).to_string();
-                                source_node_key = Some(value.clone());
-                                properties.insert(field.name().clone(), Value::String(value));
-                            }
-                        }
-                    }
                     _ => {
                         if let Some(value) = Self::arrow_value_to_helix_value(column, row) {
                             properties.insert(field.name().clone(), value);
@@ -763,61 +949,34 @@ impl FStorageSynchronizer {
             let vector_record_identity = existing_id.clone().unwrap_or_else(|| vector_uuid.clone());
             vector_ids.push(Some(vector_record_identity.clone()));
 
-            if entity_type == ReadmeChunk::ENTITY_TYPE {
-                if let Some(project_url) = project_url.clone() {
-                    let project_id = utils::id::stable_node_id_u128(
-                        Project::ENTITY_TYPE,
-                        &[("url", project_url.clone())],
-                    );
-                    let project_uuid = Uuid::from_u128(project_id).to_string();
-                    let edge_id = utils::id::stable_edge_id_u128(
-                        ContainsContent::ENTITY_TYPE,
-                        &project_uuid,
+            if let Some(rule_set) = rules {
+                for rule in &rule_set.rules {
+                    match Self::resolve_vector_rule(
+                        rule,
+                        &columns,
+                        &column_index,
+                        row,
+                        row_created_at,
                         &vector_uuid,
-                    );
-                    let edge_timestamp = row_created_at.clone();
-                    contains_content_edges.push(ContainsContent {
-                        id: Some(Uuid::from_u128(edge_id).to_string()),
-                        from_node_id: Some(project_uuid),
-                        to_node_id: Some(vector_uuid.clone()),
-                        from_node_type: Some(Project::ENTITY_TYPE.to_string()),
-                        to_node_type: Some(ReadmeChunk::ENTITY_TYPE.to_string()),
-                        created_at: edge_timestamp.clone(),
-                        updated_at: edge_timestamp,
-                    });
-                }
-            } else if entity_type == CodeChunk::ENTITY_TYPE {
-                if let (Some(source_id), Some(node_key)) =
-                    (source_node_id.clone(), source_node_key.clone())
-                {
-                    if let Some(from_type) = extract_node_type_from_key(&node_key) {
-                        let edge_identity = vector_record_identity.clone();
-                        let edge_id = utils::id::stable_edge_id_u128(
-                            Embeds::ENTITY_TYPE,
-                            &source_id,
-                            &edge_identity,
-                        );
-                        let edge_timestamp = row_created_at.clone();
-                        embeds_edges.push(Embeds {
-                            id: Some(Uuid::from_u128(edge_id).to_string()),
-                            from_node_id: Some(source_id),
-                            to_node_id: Some(vector_uuid.clone()),
-                            from_node_type: Some(from_type.to_string()),
-                            to_node_type: Some(CodeChunk::ENTITY_TYPE.to_string()),
-                            created_at: edge_timestamp.clone(),
-                            updated_at: edge_timestamp,
-                        });
-                    } else {
-                        log::warn!(
-                            "Unable to derive source node type from key '{}' for CodeChunk vector",
-                            node_key
-                        );
+                        &vector_record_identity,
+                    ) {
+                        Ok(Some(edge)) => {
+                            edges_by_type
+                                .entry(rule.edge_type.to_string())
+                                .or_default()
+                                .push(edge);
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            log::warn!(
+                                "Failed to materialize edge '{}' for vector '{}' row {}: {}",
+                                rule.edge_type,
+                                entity_type,
+                                row,
+                                err
+                            );
+                        }
                     }
-                } else {
-                    log::warn!(
-                        "Missing source node identifiers for CodeChunk vector row {}, skipping edge",
-                        row
-                    );
                 }
             }
         }
@@ -846,40 +1005,20 @@ impl FStorageSynchronizer {
             &merge_keys,
         )?;
 
-        if !contains_content_edges.is_empty() {
-            let edge_batch = ContainsContent::to_record_batch(contains_content_edges.clone())?;
-            let edge_table = format!(
-                "silver/edges/{}",
-                ContainsContent::ENTITY_TYPE
-                    .strip_prefix("edge_")
-                    .unwrap_or(ContainsContent::ENTITY_TYPE)
-                    .to_lowercase()
-            );
-            self.lake
-                .write_batches(
-                    &edge_table,
-                    vec![edge_batch.clone()],
-                    Some(vec!["id".to_string()]),
-                )
-                .await?;
-            self.catalog.ensure_ingestion_offset(
-                &edge_table,
-                ContainsContent::ENTITY_TYPE,
-                crate::fetch::EntityCategory::Edge,
-                &vec!["id".to_string()],
-            )?;
-            self.update_engine_from_batch(Box::new(contains_content_edges), &edge_batch)?;
-        }
+        for (edge_type, edges) in edges_by_type.into_iter() {
+            if edges.is_empty() {
+                continue;
+            }
 
-        if !embeds_edges.is_empty() {
-            let edge_batch = Embeds::to_record_batch(embeds_edges.clone())?;
+            let edge_batch = Self::build_edge_record_batch(&edges)?;
             let edge_table = format!(
                 "silver/edges/{}",
-                Embeds::ENTITY_TYPE
+                edge_type
                     .strip_prefix("edge_")
-                    .unwrap_or(Embeds::ENTITY_TYPE)
+                    .unwrap_or(&edge_type)
                     .to_lowercase()
             );
+
             self.lake
                 .write_batches(
                     &edge_table,
@@ -889,11 +1028,16 @@ impl FStorageSynchronizer {
                 .await?;
             self.catalog.ensure_ingestion_offset(
                 &edge_table,
-                Embeds::ENTITY_TYPE,
+                &edge_type,
                 crate::fetch::EntityCategory::Edge,
                 &vec!["id".to_string()],
             )?;
-            self.update_engine_from_batch(Box::new(embeds_edges), &edge_batch)?;
+            self.update_engine_from_batch_with_meta(
+                &edge_type,
+                crate::fetch::EntityCategory::Edge,
+                &vec!["id".to_string()],
+                &edge_batch,
+            )?;
         }
 
         Ok(())

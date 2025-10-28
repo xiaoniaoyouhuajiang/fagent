@@ -3,6 +3,8 @@ use helix_db::helixc::parser::{
     self,
     types::{FieldType, HxFile},
 };
+use serde::Deserialize;
+use serde_json;
 use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
@@ -11,6 +13,7 @@ use std::path::Path;
 
 fn main() -> anyhow::Result<()> {
     println!("cargo:rerun-if-changed=../helixdb-cfg/schema.hx");
+    println!("cargo:rerun-if-changed=../helixdb-cfg/vector_rules.json");
     println!("cargo:rerun-if-changed=build.rs");
 
     let schema_path = Path::new("../helixdb-cfg/schema.hx");
@@ -30,6 +33,9 @@ fn main() -> anyhow::Result<()> {
     let ast = parser::HelixParser::parse_source(&content)
         .map_err(|e| anyhow::anyhow!("Parser error: {:?}", e))?;
 
+    let vector_rules_config =
+        load_vector_rules(Path::new("../helixdb-cfg/vector_rules.json"))?;
+
     let out_dir = env::var_os("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("generated_schemas.rs");
     let mut file = File::create(&dest_path)?;
@@ -42,9 +48,92 @@ fn main() -> anyhow::Result<()> {
     writeln!(file, "use std::sync::Arc;")?;
     writeln!(file, "")?;
 
+    writeln!(
+        file,
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum StableIdStrategy {{\n    None,\n    PrimaryKeyHash,\n}}\n"
+    )?;
+
+    writeln!(
+        file,
+        "#[derive(Debug, Clone)]\npub struct EntityMetaRecord {{\n    pub entity_type: &'static str,\n    pub category: EntityCategory,\n    pub table_name: &'static str,\n    pub primary_keys: &'static [&'static str],\n    pub fields: &'static [&'static str],\n    pub stable_id: StableIdStrategy,\n}}\n"
+    )?;
+
+    writeln!(
+        file,
+        "#[derive(Debug, Clone)]\npub struct EdgeMetaRecord {{\n    pub edge_type: &'static str,\n    pub from_entity: &'static str,\n    pub to_entity: &'static str,\n}}\n"
+    )?;
+
+    writeln!(
+        file,
+        "#[derive(Debug, Clone)]\npub struct VectorKeyMappingRecord {{\n    pub vector_column: &'static str,\n    pub primary_key: &'static str,\n}}\n"
+    )?;
+
+    writeln!(
+        file,
+        "#[derive(Debug, Clone)]\npub enum VectorSourceRecord {{\n    PrimaryKey {{ entity_type: &'static str, mappings: &'static [VectorKeyMappingRecord] }},\n    DirectColumn {{ column: &'static str }},\n}}\n"
+    )?;
+
+    writeln!(
+        file,
+        "#[derive(Debug, Clone)]\npub enum VectorSourceTypeRecord {{\n    Literal(&'static str),\n    FromKeyPattern(&'static str),\n}}\n"
+    )?;
+
+    writeln!(
+        file,
+        "#[derive(Debug, Clone)]\npub struct VectorEdgeRuleRecord {{\n    pub vector_entity: &'static str,\n    pub edge_type: &'static str,\n    pub target_node_type: &'static str,\n    pub source: VectorSourceRecord,\n    pub source_node_type: VectorSourceTypeRecord,\n}}\n"
+    )?;
+
+    let mut entity_meta_entries: Vec<String> = Vec::new();
+    let mut edge_meta_entries: Vec<String> = Vec::new();
+    let mut vector_mapping_defs: Vec<String> = Vec::new();
+    let mut vector_rule_entries: Vec<String> = Vec::new();
+
     if let Some(latest_schema) = ast.get_schemas_in_order().last() {
         for node_schema in &latest_schema.node_schemas {
             let struct_name = &node_schema.name.1.to_upper_camel_case();
+            let entity_type = struct_name.to_lowercase();
+            let table_name = format!("silver/entities/{}", entity_type);
+            let primary_keys: Vec<String> = node_schema
+                .fields
+                .iter()
+                .filter(|field| field.is_indexed())
+                .map(|field| field.name.clone())
+                .collect();
+            let fields: Vec<String> = node_schema
+                .fields
+                .iter()
+                .map(|field| field.name.clone())
+                .collect();
+            let stable_strategy = if primary_keys.is_empty() {
+                "StableIdStrategy::None"
+            } else {
+                "StableIdStrategy::PrimaryKeyHash"
+            };
+            entity_meta_entries.push(format!(
+                "EntityMetaRecord {{ entity_type: \"{entity}\", category: EntityCategory::Node, table_name: \"{table}\", primary_keys: &[{pks}], fields: &[{fields}], stable_id: {stable} }}",
+                entity = entity_type,
+                table = table_name,
+                pks = if primary_keys.is_empty() {
+                    String::new()
+                } else {
+                    primary_keys
+                        .iter()
+                        .map(|pk| format!("\"{}\"", pk))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                fields = if fields.is_empty() {
+                    String::new()
+                } else {
+                    fields
+                        .iter()
+                        .map(|f| format!("\"{}\"", f))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                stable = stable_strategy
+            ));
+
             writeln!(file, "#[derive(Debug, Serialize, Deserialize, Clone)]")?;
             writeln!(file, "pub struct {} {{", struct_name)?;
             for field in &node_schema.fields {
@@ -67,17 +156,216 @@ fn main() -> anyhow::Result<()> {
             if !generated_edge_names.insert(edge_struct_name.clone()) {
                 continue;
             }
+            let edge_type = edge_struct_name.to_lowercase();
+            let from_entity = edge_schema.from.1.to_upper_camel_case().to_lowercase();
+            let to_entity = edge_schema.to.1.to_upper_camel_case().to_lowercase();
+            edge_meta_entries.push(format!(
+                "EdgeMetaRecord {{ edge_type: \"{edge_type}\", from_entity: \"{from_entity}\", to_entity: \"{to_entity}\" }}",
+                edge_type = format!("edge_{}", edge_type),
+                from_entity = from_entity,
+                to_entity = to_entity
+            ));
             generate_edge_struct(&mut file, edge_schema)?;
             writeln!(file, "")?;
         }
 
         for vector_schema in &latest_schema.vector_schemas {
+            let struct_name = vector_schema.name.to_upper_camel_case();
+            let entity_type = struct_name.to_lowercase();
+            let table_name = format!("silver/vectors/{}", entity_type);
+            let mut fields: Vec<String> = vector_schema
+                .fields
+                .iter()
+                .map(|field| field.name.clone())
+                .collect();
+            fields.extend(
+                [
+                    "text",
+                    "embedding",
+                    "embedding_model",
+                    "embedding_id",
+                    "token_count",
+                    "chunk_order",
+                    "created_at",
+                    "updated_at",
+                ]
+                .into_iter()
+                .map(|s| s.to_string()),
+            );
+            entity_meta_entries.push(format!(
+                "EntityMetaRecord {{ entity_type: \"{entity}\", category: EntityCategory::Vector, table_name: \"{table}\", primary_keys: &[\"id\"], fields: &[{fields}], stable_id: StableIdStrategy::None }}",
+                entity = entity_type,
+                table = table_name,
+                fields = fields
+                    .iter()
+                    .map(|f| format!("\"{}\"", f))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
             generate_vector_struct(&mut file, vector_schema)?;
             writeln!(file, "")?;
         }
+
+        if let Some(config) = &vector_rules_config {
+            let mut mapping_counter = 0usize;
+            for vector_entry in &config.vectors {
+                for edge_entry in &vector_entry.edges {
+                    let source_code = match &edge_entry.source {
+                        VectorSourceConfig::PrimaryKey {
+                            entity_type,
+                            mappings,
+                        } => {
+                            let mapping_ident =
+                                format!("VECTOR_RULE_MAPPING_{}", mapping_counter);
+                            mapping_counter += 1;
+                            let mapping_values: Vec<String> = mappings
+                                .iter()
+                                .map(|mapping| {
+                                    format!(
+                                        "VectorKeyMappingRecord {{ vector_column: \"{}\", primary_key: \"{}\" }}",
+                                        mapping.vector_column, mapping.primary_key
+                                    )
+                                })
+                                .collect();
+                            vector_mapping_defs.push(format!(
+                                "pub const {}: &[VectorKeyMappingRecord] = &[{}];",
+                                mapping_ident,
+                                mapping_values.join(", ")
+                            ));
+                            format!(
+                                "VectorSourceRecord::PrimaryKey {{ entity_type: \"{}\", mappings: {} }}",
+                                entity_type, mapping_ident
+                            )
+                        }
+                        VectorSourceConfig::DirectColumn { column } => format!(
+                            "VectorSourceRecord::DirectColumn {{ column: \"{}\" }}",
+                            column
+                        ),
+                    };
+
+                    let node_type_code = match &edge_entry.source_node_type {
+                        VectorSourceNodeTypeConfig::Literal { value } => {
+                            format!("VectorSourceTypeRecord::Literal(\"{}\")", value)
+                        }
+                        VectorSourceNodeTypeConfig::FromKey { column } => format!(
+                            "VectorSourceTypeRecord::FromKeyPattern(\"{}\")",
+                            column
+                        ),
+                    };
+
+                    vector_rule_entries.push(format!(
+                        "VectorEdgeRuleRecord {{ vector_entity: \"{}\", edge_type: \"{}\", target_node_type: \"{}\", source: {}, source_node_type: {} }}",
+                        vector_entry.vector_entity,
+                        edge_entry.edge_type,
+                        edge_entry.target_node_type,
+                        source_code,
+                        node_type_code
+                    ));
+                }
+            }
+        }
+
+        // Generate meta arrays
+        writeln!(
+            file,
+            "pub const GENERATED_ENTITY_METADATA: &[EntityMetaRecord] = &[\n    {}\n];",
+            entity_meta_entries.join(",\n    ")
+        )?;
+
+        if !edge_meta_entries.is_empty() {
+            writeln!(
+                file,
+                "pub const GENERATED_EDGE_METADATA: &[EdgeMetaRecord] = &[\n    {}\n];",
+                edge_meta_entries.join(",\n    ")
+            )?;
+        } else {
+            writeln!(
+                file,
+                "pub const GENERATED_EDGE_METADATA: &[EdgeMetaRecord] = &[];"
+            )?;
+        }
+    }
+
+    for def in &vector_mapping_defs {
+        writeln!(file, "{}", def)?;
+    }
+
+    if vector_rule_entries.is_empty() {
+        writeln!(
+            file,
+            "pub const GENERATED_VECTOR_EDGE_RULES: &[VectorEdgeRuleRecord] = &[];"
+        )?;
+    } else {
+        writeln!(
+            file,
+            "pub const GENERATED_VECTOR_EDGE_RULES: &[VectorEdgeRuleRecord] = &[\n    {}\n];",
+            vector_rule_entries.join(",\n    ")
+        )?;
     }
 
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct VectorRulesConfig {
+    vectors: Vec<VectorVectorConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VectorVectorConfig {
+    vector_entity: String,
+    edges: Vec<VectorEdgeConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VectorEdgeConfig {
+    edge_type: String,
+    target_node_type: String,
+    source: VectorSourceConfig,
+    #[serde(rename = "source_node_type")]
+    source_node_type: VectorSourceNodeTypeConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind")]
+enum VectorSourceConfig {
+    #[serde(rename = "primary_key")]
+    PrimaryKey {
+        entity_type: String,
+        mappings: Vec<VectorMappingConfig>,
+    },
+    #[serde(rename = "direct_column")]
+    DirectColumn { column: String },
+}
+
+#[derive(Debug, Deserialize)]
+struct VectorMappingConfig {
+    vector_column: String,
+    primary_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind")]
+enum VectorSourceNodeTypeConfig {
+    #[serde(rename = "literal")]
+    Literal { value: String },
+    #[serde(rename = "from_key")]
+    FromKey { column: String },
+}
+
+fn load_vector_rules(path: &Path) -> anyhow::Result<Option<VectorRulesConfig>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(path)?;
+    let config: VectorRulesConfig = serde_json::from_str(&content).map_err(|err| {
+        anyhow::anyhow!(
+            "Failed to parse vector rules JSON '{}': {}",
+            path.display(),
+            err
+        )
+    })?;
+    Ok(Some(config))
 }
 
 fn generate_edge_struct(

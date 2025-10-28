@@ -7,6 +7,7 @@ pub mod fetch;
 pub mod lake;
 pub mod models;
 pub mod schemas;
+pub mod schema_registry;
 pub mod sync;
 pub mod utils;
 
