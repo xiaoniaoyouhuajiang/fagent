@@ -83,10 +83,16 @@ fn main() -> anyhow::Result<()> {
         "#[derive(Debug, Clone)]\npub struct VectorEdgeRuleRecord {{\n    pub vector_entity: &'static str,\n    pub edge_type: &'static str,\n    pub target_node_type: &'static str,\n    pub source: VectorSourceRecord,\n    pub source_node_type: VectorSourceTypeRecord,\n}}\n"
     )?;
 
+    writeln!(
+        file,
+        "#[derive(Debug, Clone)]\npub struct VectorIndexRecord {{\n    pub vector_entity: &'static str,\n    pub id_column: &'static str,\n    pub index_table: &'static str,\n}}\n"
+    )?;
+
     let mut entity_meta_entries: Vec<String> = Vec::new();
     let mut edge_meta_entries: Vec<String> = Vec::new();
     let mut vector_mapping_defs: Vec<String> = Vec::new();
     let mut vector_rule_entries: Vec<String> = Vec::new();
+    let mut vector_index_entries: Vec<String> = Vec::new();
 
     if let Some(latest_schema) = ast.get_schemas_in_order().last() {
         for node_schema in &latest_schema.node_schemas {
@@ -209,6 +215,12 @@ fn main() -> anyhow::Result<()> {
         if let Some(config) = &vector_rules_config {
             let mut mapping_counter = 0usize;
             for vector_entry in &config.vectors {
+                vector_index_entries.push(format!(
+                    "VectorIndexRecord {{ vector_entity: \"{}\", id_column: \"{}\", index_table: \"silver/index_vector/{}\" }}",
+                    vector_entry.vector_entity,
+                    vector_entry.id_column,
+                    vector_entry.vector_entity
+                ));
                 for edge_entry in &vector_entry.edges {
                     let source_code = match &edge_entry.source {
                         VectorSourceConfig::PrimaryKey {
@@ -303,6 +315,19 @@ fn main() -> anyhow::Result<()> {
         )?;
     }
 
+    if vector_index_entries.is_empty() {
+        writeln!(
+            file,
+            "pub const GENERATED_VECTOR_INDEX_RULES: &[VectorIndexRecord] = &[];"
+        )?;
+    } else {
+        writeln!(
+            file,
+            "pub const GENERATED_VECTOR_INDEX_RULES: &[VectorIndexRecord] = &[\n    {}\n];",
+            vector_index_entries.join(",\n    ")
+        )?;
+    }
+
     Ok(())
 }
 
@@ -314,6 +339,7 @@ struct VectorRulesConfig {
 #[derive(Debug, Deserialize)]
 struct VectorVectorConfig {
     vector_entity: String,
+    id_column: String,
     edges: Vec<VectorEdgeConfig>,
 }
 

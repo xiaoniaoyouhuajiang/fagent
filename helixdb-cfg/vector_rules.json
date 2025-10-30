@@ -2,6 +2,7 @@
   "vectors": [
     {
       "vector_entity": "readmechunk",
+      "id_column": "embedding_id",
       "edges": [
         {
           "edge_type": "edge_containscontent",
@@ -25,6 +26,7 @@
     },
     {
       "vector_entity": "codechunk",
+      "id_column": "embedding_id",
       "edges": [
         {
           "edge_type": "edge_embeds",

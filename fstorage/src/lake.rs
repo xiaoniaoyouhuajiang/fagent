@@ -2,6 +2,7 @@ use crate::config::StorageConfig;
 use crate::errors::{Result, StorageError};
 use crate::models::{ColumnSummary, HybridSearchHit, TableSummary, TextSearchHit, VectorSearchHit};
 use crate::utils;
+use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use deltalake::DeltaTable;
 use deltalake::DeltaTableBuilder;
@@ -726,6 +727,89 @@ impl Lake {
 
         self.lookup_node_in_table_by_keys(entity_type, primary_keys, &id_string)
             .await
+    }
+
+    pub async fn load_vector_index_map(
+        &self,
+        index_table: &str,
+        id_column: &str,
+        ids: &[String],
+    ) -> Result<HashMap<String, String>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let table_path = self.config.lake_path.join(index_table);
+        if tokio::fs::metadata(&table_path).await.is_err() {
+            return Ok(HashMap::new());
+        }
+
+        let table_uri = self.path_to_url(&table_path)?;
+        let table = match deltalake::open_table(table_uri).await {
+            Ok(table) => table,
+            Err(deltalake::DeltaTableError::NotATable(_)) => return Ok(HashMap::new()),
+            Err(err) => return Err(StorageError::from(err)),
+        };
+
+        let ctx = Self::single_partition_session();
+        ctx.register_table("vector_index", Arc::new(table))
+            .map_err(|e| StorageError::Other(e.into()))?;
+
+        let escaped_ids: Vec<String> = ids
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect();
+        if escaped_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let sql = format!(
+            "SELECT \"{id_col}\" as id_value, vector_uuid FROM vector_index WHERE \"{id_col}\" IN ({values})",
+            id_col = id_column,
+            values = escaped_ids.join(", ")
+        );
+        let df = ctx.sql(&sql).await.map_err(|e| StorageError::Other(e.into()))?;
+        let batches = df.collect().await.map_err(|e| StorageError::Other(e.into()))?;
+
+        let mut map = HashMap::new();
+        for batch in batches {
+            if batch.num_columns() < 2 {
+                continue;
+            }
+            let id_array = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| {
+                    StorageError::Other(anyhow!(
+                        "Vector index '{}' id column '{}' is not Utf8",
+                        index_table,
+                        id_column
+                    ))
+                })?;
+            let uuid_array = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| {
+                    StorageError::Other(anyhow!(
+                        "Vector index '{}' missing Utf8 vector_uuid column",
+                        index_table
+                    ))
+                })?;
+
+            for row in 0..batch.num_rows() {
+                if id_array.is_null(row) || uuid_array.is_null(row) {
+                    continue;
+                }
+                map.insert(
+                    id_array.value(row).to_string(),
+                    uuid_array.value(row).to_string(),
+                );
+            }
+        }
+
+        Ok(map)
     }
 
     pub async fn neighbors(

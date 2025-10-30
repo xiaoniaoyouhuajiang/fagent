@@ -6,9 +6,7 @@ use crate::fetch::{
 };
 use crate::lake::Lake;
 use crate::models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext};
-use crate::schema_registry::{
-    vector_rules, SourceNodeId, SourceNodeType, SCHEMA_REGISTRY,
-};
+use crate::schema_registry::{vector_index, vector_rules, SourceNodeId, SourceNodeType, SCHEMA_REGISTRY};
 use crate::utils;
 use async_trait::async_trait;
 use bincode;
@@ -41,7 +39,7 @@ use helix_db::{
         label_hash::hash_label,
     },
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
@@ -94,6 +92,13 @@ struct EdgeWrite {
     from_node_type: Option<String>,
     to_node_type: Option<String>,
     created_at: Option<DateTime<Utc>>,
+    updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+struct VectorIndexWrite {
+    id_value: String,
+    vector_uuid: String,
     updated_at: Option<DateTime<Utc>>,
 }
 
@@ -296,6 +301,44 @@ impl FStorageSynchronizer {
             auto_fetchable::to_arrow_array(from_types)?,
             auto_fetchable::to_arrow_array(to_types)?,
             auto_fetchable::to_arrow_array(created_at)?,
+            auto_fetchable::to_arrow_array(updated_at)?,
+        ];
+
+        let schema = Schema::new(fields);
+        Ok(RecordBatch::try_new(Arc::new(schema), arrays)?)
+    }
+
+    fn build_vector_index_batch(
+        id_column: &str,
+        updates: &[VectorIndexWrite],
+    ) -> Result<RecordBatch> {
+        let id_values: Vec<Option<String>> = updates
+            .iter()
+            .map(|update| Some(update.id_value.clone()))
+            .collect();
+        let vector_ids: Vec<Option<String>> = updates
+            .iter()
+            .map(|update| Some(update.vector_uuid.clone()))
+            .collect();
+        let updated_at: Vec<Option<DateTime<Utc>>> =
+            updates.iter().map(|update| update.updated_at).collect();
+
+        let fields = vec![
+            Field::new(id_column, DataType::Utf8, false),
+            Field::new("vector_uuid", DataType::Utf8, false),
+            Field::new(
+                "updated_at",
+                DataType::Timestamp(
+                    deltalake::arrow::datatypes::TimeUnit::Microsecond,
+                    Some("UTC".into()),
+                ),
+                true,
+            ),
+        ];
+
+        let arrays = vec![
+            auto_fetchable::to_arrow_array(id_values)?,
+            auto_fetchable::to_arrow_array(vector_ids)?,
             auto_fetchable::to_arrow_array(updated_at)?,
         ];
 
@@ -834,6 +877,7 @@ impl FStorageSynchronizer {
             })?;
 
         let rules = vector_rules(entity_type);
+        let vector_index_meta = vector_index(entity_type).cloned();
 
         let id_idx = schema.column_with_name("id").map(|(idx, _)| idx);
         let created_at_idx = schema.column_with_name("created_at").map(|(idx, _)| idx);
@@ -844,8 +888,44 @@ impl FStorageSynchronizer {
             column_index.insert(field.name().clone(), idx);
         }
 
+        // Load existing vector UUIDs for embedding IDs that appear in this batch.
+        let mut existing_index: HashMap<String, String> = HashMap::new();
+        if let Some(meta) = vector_index_meta.as_ref() {
+            if let Some((idx, _)) = schema.column_with_name(meta.id_column) {
+                if let Some(arr) = columns[idx].as_any().downcast_ref::<StringArray>() {
+                    let mut unique_ids: HashSet<String> = HashSet::new();
+                    for row in 0..num_rows {
+                        if arr.is_null(row) {
+                            continue;
+                        }
+                        unique_ids.insert(arr.value(row).to_string());
+                    }
+                    if !unique_ids.is_empty() {
+                        let ids: Vec<String> = unique_ids.into_iter().collect();
+                        existing_index = self
+                            .lake
+                            .load_vector_index_map(meta.index_table, meta.id_column, &ids)
+                            .await?;
+                    }
+                } else {
+                    log::warn!(
+                        "Vector entity '{}' expects id column '{}' but batch column is not Utf8; dedup disabled.",
+                        entity_type,
+                        meta.id_column
+                    );
+                }
+            } else {
+                log::warn!(
+                    "Vector entity '{}' missing id column '{}' in batch schema; dedup disabled for this batch.",
+                    entity_type,
+                    meta.id_column
+                );
+            }
+        }
+
         let mut vector_ids: Vec<Option<String>> = Vec::with_capacity(num_rows);
         let mut edges_by_type: HashMap<String, Vec<EdgeWrite>> = HashMap::new();
+        let mut index_updates: HashMap<String, VectorIndexWrite> = HashMap::new();
 
         let mut txn = self.engine.storage.graph_env.write_txn()?;
 
@@ -853,6 +933,7 @@ impl FStorageSynchronizer {
             let mut properties = HashMap::new();
             let mut embedding: Option<Vec<f64>> = None;
             let mut row_created_at: Option<DateTime<Utc>> = None;
+            let mut id_value: Option<String> = None;
 
             let existing_id = id_idx.and_then(|idx| {
                 columns[idx]
@@ -904,8 +985,19 @@ impl FStorageSynchronizer {
                             }
                         }
                     }
-                    "id" => {
-                        // handled separately
+                    "id" => {}
+                    name if vector_index_meta
+                        .as_ref()
+                        .map(|meta| meta.id_column == name)
+                        .unwrap_or(false) =>
+                    {
+                        if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
+                            if !arr.is_null(row) {
+                                let value = arr.value(row).to_string();
+                                id_value = Some(value.clone());
+                                properties.insert(field.name().clone(), Value::String(value));
+                            }
+                        }
                     }
                     _ => {
                         if let Some(value) = Self::arrow_value_to_helix_value(column, row) {
@@ -915,39 +1007,99 @@ impl FStorageSynchronizer {
                 }
             }
 
-            let Some(embedding_vec) = embedding else {
-                log::warn!(
-                    "Skipping vector of type '{}' at row {} due to missing embedding values",
-                    entity_type,
-                    row
-                );
-                vector_ids.push(existing_id);
-                continue;
-            };
+            let existing_uuid = id_value
+                .as_ref()
+                .and_then(|id| existing_index.get(id).cloned());
 
-            if embedding_vec.is_empty() {
-                log::warn!(
-                    "Skipping vector of type '{}' at row {} because embedding is empty",
-                    entity_type,
-                    row
-                );
-                vector_ids.push(existing_id);
-                continue;
+            let vector_uuid_final: String;
+            let vector_record_identity_final: String;
+
+            if let Some(existing_uuid) = existing_uuid {
+                let record_identity = existing_id.clone().unwrap_or(existing_uuid.clone());
+                vector_ids.push(Some(record_identity.clone()));
+                vector_uuid_final = existing_uuid;
+                vector_record_identity_final = record_identity;
+            } else {
+                let Some(embedding_vec) = embedding else {
+                    log::warn!(
+                        "Skipping vector of type '{}' at row {} due to missing embedding values",
+                        entity_type,
+                        row
+                    );
+                    vector_ids.push(existing_id);
+                    continue;
+                };
+
+                if embedding_vec.is_empty() {
+                    log::warn!(
+                        "Skipping vector of type '{}' at row {} because embedding is empty",
+                        entity_type,
+                        row
+                    );
+                    vector_ids.push(existing_id);
+                    continue;
+                }
+
+                let props_vec: Vec<(String, Value)> = properties.clone().into_iter().collect();
+                let fields_opt = if props_vec.is_empty() {
+                    None
+                } else {
+                    Some(props_vec)
+                };
+
+                let traversal = G::new_mut(self.engine.storage.clone(), &mut txn)
+                    .insert_v::<fn(&HVector, &RoTxn) -> bool>(
+                        &embedding_vec,
+                        entity_type,
+                        fields_opt,
+                    )
+                    .collect_to_obj();
+                let new_uuid = traversal.uuid();
+                let record_identity = existing_id
+                    .clone()
+                    .unwrap_or_else(|| new_uuid.clone());
+                vector_ids.push(Some(record_identity.clone()));
+
+                if let (Some(_), Some(id)) = (vector_index_meta.as_ref(), id_value.as_ref()) {
+                    let timestamp = row_created_at.clone().unwrap_or_else(|| {
+                        let now = Utc::now();
+                        row_created_at = Some(now);
+                        now
+                    });
+                    existing_index.insert(id.clone(), new_uuid.clone());
+                    index_updates.insert(
+                        id.clone(),
+                        VectorIndexWrite {
+                            id_value: id.clone(),
+                            vector_uuid: new_uuid.clone(),
+                            updated_at: Some(timestamp),
+                        },
+                    );
+                }
+
+                vector_uuid_final = new_uuid;
+                vector_record_identity_final = record_identity;
             }
 
-            let props_vec: Vec<(String, Value)> = properties.into_iter().collect();
-            let fields_opt = if props_vec.is_empty() {
-                None
-            } else {
-                Some(props_vec)
-            };
-
-            let traversal = G::new_mut(self.engine.storage.clone(), &mut txn)
-                .insert_v::<fn(&HVector, &RoTxn) -> bool>(&embedding_vec, entity_type, fields_opt)
-                .collect_to_obj();
-            let vector_uuid = traversal.uuid();
-            let vector_record_identity = existing_id.clone().unwrap_or_else(|| vector_uuid.clone());
-            vector_ids.push(Some(vector_record_identity.clone()));
+            if let (Some(_), Some(id)) = (vector_index_meta.as_ref(), id_value.as_ref()) {
+                let timestamp = row_created_at.clone().unwrap_or_else(|| {
+                    let now = Utc::now();
+                    row_created_at = Some(now);
+                    now
+                });
+                existing_index.insert(id.clone(), vector_uuid_final.clone());
+                index_updates
+                    .entry(id.clone())
+                    .and_modify(|entry| {
+                        entry.vector_uuid = vector_uuid_final.clone();
+                        entry.updated_at = Some(timestamp);
+                    })
+                    .or_insert(VectorIndexWrite {
+                        id_value: id.clone(),
+                        vector_uuid: vector_uuid_final.clone(),
+                        updated_at: Some(timestamp),
+                    });
+            }
 
             if let Some(rule_set) = rules {
                 for rule in &rule_set.rules {
@@ -957,8 +1109,8 @@ impl FStorageSynchronizer {
                         &column_index,
                         row,
                         row_created_at,
-                        &vector_uuid,
-                        &vector_record_identity,
+                        &vector_uuid_final,
+                        &vector_record_identity_final,
                     ) {
                         Ok(Some(edge)) => {
                             edges_by_type
@@ -1037,6 +1189,24 @@ impl FStorageSynchronizer {
                 crate::fetch::EntityCategory::Edge,
                 &vec!["id".to_string()],
                 &edge_batch,
+            )?;
+        }
+
+        if let (Some(meta), true) = (vector_index_meta.as_ref(), !index_updates.is_empty()) {
+            let updates: Vec<VectorIndexWrite> = index_updates.into_values().collect();
+            let index_batch = Self::build_vector_index_batch(meta.id_column, &updates)?;
+            self.lake
+                .write_batches(
+                    meta.index_table,
+                    vec![index_batch.clone()],
+                    Some(vec![meta.id_column.to_string()]),
+                )
+                .await?;
+            self.catalog.ensure_ingestion_offset(
+                meta.index_table,
+                entity_type,
+                crate::fetch::EntityCategory::Vector,
+                &vec![meta.id_column.to_string()],
             )?;
         }
 

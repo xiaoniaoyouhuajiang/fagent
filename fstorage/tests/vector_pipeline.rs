@@ -5,12 +5,14 @@ use deltalake::{
 };
 use fstorage::{
     fetch::{EntityCategory, Fetchable},
+    schema_registry,
     schemas::generated_schemas::{CodeChunk, Function, Project, ReadmeChunk},
     sync::DataSynchronizer,
     utils,
 };
 use heed3::RoTxn;
 use helix_db::{
+    helix_engine::storage_core::graph_visualization::GraphVisualization,
     helix_engine::traversal_core::ops::out::out::OutAdapter,
     helix_engine::traversal_core::ops::source::{add_e::EdgeType, n_from_id::NFromIdAdapter},
     helix_engine::traversal_core::ops::vectors::search::SearchVAdapter,
@@ -19,11 +21,108 @@ use helix_db::{
         vector_core::vector::HVector,
     },
 };
+use serde_json::Value;
 use std::{path::PathBuf, sync::Arc};
 use url::Url;
 use uuid::Uuid;
 
 mod common;
+
+#[tokio::test]
+async fn readme_vectors_are_idempotent() -> anyhow::Result<()> {
+    let ctx = common::init_test_context().await?;
+
+    let project_url = "https://github.com/example/repo-idempotent".to_string();
+    let project = Project {
+        url: Some(project_url.clone()),
+        name: Some("example".to_string()),
+        description: Some("Vector idempotency test".to_string()),
+        language: Some("Rust".to_string()),
+        stars: Some(1),
+        forks: Some(0),
+    };
+
+    let embedding_values = vec![0.4_f32, 0.5_f32, 0.6_f32];
+    let embedding_id = "readme-vector-idem".to_string();
+    let readme_chunk = ReadmeChunk {
+        id: None,
+        project_url: Some(project_url.clone()),
+        revision_sha: Some("abc456".to_string()),
+        source_file: Some("README.md".to_string()),
+        start_line: Some(1),
+        end_line: Some(20),
+        text: Some("# Example".to_string()),
+        embedding: Some(embedding_values.clone()),
+        embedding_model: Some("fixture-model".to_string()),
+        embedding_id: Some(embedding_id.clone()),
+        token_count: Some(24),
+        chunk_order: Some(0),
+        created_at: Some(Utc::now()),
+        updated_at: None,
+    };
+
+    let mut first_graph = fstorage::fetch::GraphData::new();
+    first_graph.add_entities(vec![project.clone()]);
+    first_graph.add_entities(vec![readme_chunk.clone()]);
+    ctx.synchronizer.process_graph_data(first_graph).await?;
+
+    let vector_table = ctx.config.lake_path.join(ReadmeChunk::table_name());
+    assert_eq!(
+        delta_row_count(vector_table.clone()).await?,
+        1,
+        "Delta table should contain a single vector row after first sync"
+    );
+    let index_meta = schema_registry::vector_index(ReadmeChunk::ENTITY_TYPE)
+        .expect("vector index metadata for readme chunk");
+    let index_table = ctx.config.lake_path.join(index_meta.index_table);
+    assert_eq!(
+        delta_row_count(index_table.clone()).await?,
+        1,
+        "Vector index table records single entry after first sync"
+    );
+
+    let first_uuid = vector_uuid_for_embedding(&ctx, &embedding_id).await?;
+    assert!(
+        first_uuid.is_some(),
+        "vector UUID should be registered in index after first sync"
+    );
+    let first_vector_count = helix_vector_count(&ctx)?;
+    assert!(
+        first_vector_count >= 1,
+        "Helix should contain at least one vector after first sync"
+    );
+
+    let mut second_graph = fstorage::fetch::GraphData::new();
+    second_graph.add_entities(vec![project]);
+    let mut updated_chunk = readme_chunk;
+    updated_chunk.text = Some("# Example Updated".to_string());
+    second_graph.add_entities(vec![updated_chunk]);
+    ctx.synchronizer.process_graph_data(second_graph).await?;
+
+    assert_eq!(
+        delta_row_count(vector_table.clone()).await?,
+        1,
+        "Delta table should still report a single vector row after second sync"
+    );
+    assert_eq!(
+        delta_row_count(index_table.clone()).await?,
+        1,
+        "Vector index table should remain a single row after second sync"
+    );
+    let second_vector_count = helix_vector_count(&ctx)?;
+    assert_eq!(
+        second_vector_count, first_vector_count,
+        "Helix vector count should remain stable across repeated syncs"
+    );
+
+    let second_uuid = vector_uuid_for_embedding(&ctx, &embedding_id).await?;
+    assert_eq!(
+        first_uuid, second_uuid,
+        "Vector UUID should be stable across repeated syncs"
+    );
+
+    Ok(())
+}
 
 #[tokio::test]
 async fn vector_pipeline_persists_to_lake_and_engine() -> anyhow::Result<()> {
@@ -258,4 +357,35 @@ async fn delta_row_count(path: PathBuf) -> anyhow::Result<usize> {
     let df = ctx.read_table(provider)?;
     let batches = df.collect().await?;
     Ok(batches.iter().map(|batch| batch.num_rows()).sum())
+}
+
+async fn vector_uuid_for_embedding(
+    ctx: &common::TestContext,
+    embedding_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let meta = schema_registry::vector_index(ReadmeChunk::ENTITY_TYPE)
+        .expect("vector index metadata for readme chunk");
+    let map = ctx
+        .lake
+        .load_vector_index_map(
+            meta.index_table,
+            meta.id_column,
+            &[embedding_id.to_string()],
+        )
+        .await?;
+    Ok(map.get(embedding_id).cloned())
+}
+
+fn helix_vector_count(ctx: &common::TestContext) -> anyhow::Result<usize> {
+    let txn = ctx.engine.storage.graph_env.read_txn()?;
+    let stats_json = ctx
+        .engine
+        .storage
+        .get_db_stats_json(&txn)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    let stats: Value = serde_json::from_str(&stats_json)?;
+    Ok(stats
+        .get("num_vectors")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_default() as usize)
 }

@@ -5,8 +5,9 @@ use once_cell::sync::Lazy;
 use crate::fetch::EntityCategory;
 use crate::schemas::generated_schemas::{
     EdgeMetaRecord, EntityMetaRecord, StableIdStrategy, VectorEdgeRuleRecord,
-    VectorKeyMappingRecord, VectorSourceRecord, VectorSourceTypeRecord, GENERATED_EDGE_METADATA,
-    GENERATED_ENTITY_METADATA, GENERATED_VECTOR_EDGE_RULES,
+    VectorIndexRecord, VectorKeyMappingRecord, VectorSourceRecord, VectorSourceTypeRecord,
+    GENERATED_EDGE_METADATA, GENERATED_ENTITY_METADATA, GENERATED_VECTOR_EDGE_RULES,
+    GENERATED_VECTOR_INDEX_RULES,
 };
 
 #[derive(Debug, Clone)]
@@ -128,6 +129,13 @@ pub struct VectorRules {
     pub rules: Vec<VectorEdgeRule>,
 }
 
+#[derive(Debug, Clone)]
+pub struct VectorIndexMetadata {
+    pub vector_entity: &'static str,
+    pub id_column: &'static str,
+    pub index_table: &'static str,
+}
+
 pub static VECTOR_EDGE_RULES: Lazy<HashMap<&'static str, VectorRules>> = Lazy::new(|| {
     let mut map: HashMap<&'static str, VectorRules> = HashMap::new();
     for record in GENERATED_VECTOR_EDGE_RULES.iter() {
@@ -144,6 +152,28 @@ pub static VECTOR_EDGE_RULES: Lazy<HashMap<&'static str, VectorRules>> = Lazy::n
 
 pub fn vector_rules(entity_type: &str) -> Option<&VectorRules> {
     VECTOR_EDGE_RULES.get(entity_type)
+}
+
+pub static VECTOR_INDEX_RULES: Lazy<HashMap<&'static str, VectorIndexMetadata>> =
+    Lazy::new(|| {
+        let mut map = HashMap::new();
+        for record in GENERATED_VECTOR_INDEX_RULES.iter() {
+            let meta = convert_vector_index(record);
+            map.insert(meta.vector_entity, meta);
+        }
+        map
+    });
+
+pub fn vector_index(entity_type: &str) -> Option<&VectorIndexMetadata> {
+    VECTOR_INDEX_RULES.get(entity_type)
+}
+
+fn convert_vector_index(record: &VectorIndexRecord) -> VectorIndexMetadata {
+    VectorIndexMetadata {
+        vector_entity: record.vector_entity,
+        id_column: record.id_column,
+        index_table: record.index_table,
+    }
 }
 
 fn convert_vector_rule(record: &VectorEdgeRuleRecord) -> VectorEdgeRule {
