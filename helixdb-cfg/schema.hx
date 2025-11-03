@@ -1,6 +1,6 @@
 // HelixDB Schema for a GitHub Analysis Platform
-// Version 4: Implements the Snapshot Model for versioning and aligns code-level nodes with stackgraph-ast.
-schema::4 {
+// Version 5: Extends project metadata with Issues/PRs, developers, and doc vectors while keeping code graph alignment.
+schema::5 {
     // =====================================================================
     // Section 1: Project & Metadata Nodes (N::)
     // =====================================================================
@@ -17,10 +17,17 @@ schema::4 {
 
     // Represents a developer or contributor
     N::DEVELOPER {
-        INDEX name: String,         // Developer's username
+        INDEX platform: String,     // e.g. "github"
+        INDEX account_id: String,   // Stable numeric/node id from the platform
+        INDEX login: String,        // Current login/handle
+        name: String,
+        company: String,
         followers: I64,
+        following: I64,
         location: String,
         email: String,
+        created_at: Date,
+        updated_at: Date,
     }
 
     // Represents a specific commit, the ground truth for a code state
@@ -40,18 +47,69 @@ schema::4 {
 
     // Represents an issue in a repository
     N::ISSUE {
-        number: I64,
+        INDEX project_url: String,
+        INDEX number: I64,
         title: String,
+        body: String,
         state: String,
+        author_login: String,
+        author_id: String,
         created_at: Date,
+        updated_at: Date,
+        closed_at: Date,
+        comments_count: I64,
+        is_locked: Boolean,
+        milestone: String,
+        assignees: String,          // JSON array of assignee logins
+        labels: String,             // JSON array of label names
+        reactions_plus_one: I64,
+        reactions_heart: I64,
+        reactions_hooray: I64,
+        reactions_eyes: I64,
+        reactions_rocket: I64,
+        reactions_confused: I64,
+        representative_comment_ids: String, // JSON array of selected comment ids
+        representative_digest_text: String,
     }
 
     // Represents a pull request in a repository
     N::PULL_REQUEST {
-        number: I64,
+        INDEX project_url: String,
+        INDEX number: I64,
         title: String,
+        body: String,
         state: String,
+        draft: Boolean,
+        author_login: String,
+        author_id: String,
         created_at: Date,
+        updated_at: Date,
+        closed_at: Date,
+        merged: Boolean,
+        merged_at: Date,
+        merged_by: String,
+        additions: I64,
+        deletions: I64,
+        changed_files: I64,
+        commits: I64,
+        base_ref: String,
+        head_ref: String,
+        base_sha: String,
+        head_sha: String,
+        is_cross_repo: Boolean,
+        review_comments_count: I64,
+        comments_count: I64,
+        representative_comment_ids: String,
+        representative_digest_text: String,
+        related_issues: String,
+    }
+
+    // Represents a label that can be applied to issues or pull requests
+    N::LABEL {
+        INDEX project_url: String,
+        INDEX name: String,
+        color: String,
+        description: String,
     }
 
     // =====================================================================
@@ -162,6 +220,22 @@ schema::4 {
         language: String,
     }
 
+    // Represents a synthesized document chunk for an issue thread
+    V::ISSUE_DOC {
+        id: String,
+        project_url: String,
+        issue_number: I64,
+        source_updated_at: Date,
+    }
+
+    // Represents a synthesized document chunk for a pull request discussion
+    V::PR_DOC {
+        id: String,
+        project_url: String,
+        pr_number: I64,
+        source_updated_at: Date,
+    }
+
 
     // =====================================================================
     // Section 4: Edge Definitions (E::)
@@ -178,6 +252,13 @@ schema::4 {
     E::OPENED_PR { From: DEVELOPER, To: PULL_REQUEST }
     E::RELATES_TO { From: PULL_REQUEST, To: ISSUE }
     E::IMPLEMENTS_PR { From: COMMIT, To: PULL_REQUEST }
+    E::HAS_LABEL { From: ISSUE, To: LABEL }
+    E::HAS_LABEL { From: PULL_REQUEST, To: LABEL }
+    E::ASSIGNED_TO { From: ISSUE, To: DEVELOPER }
+    E::ASSIGNED_TO { From: PULL_REQUEST, To: DEVELOPER }
+    E::REVIEWED { From: DEVELOPER, To: PULL_REQUEST }
+    E::MENTIONS { From: ISSUE, To: DEVELOPER }
+    E::MENTIONS { From: PULL_REQUEST, To: DEVELOPER }
 
     // --- Code Hierarchy Edges (within a Version) ---
     E::CONTAINS { From: VERSION, To: FILE }
@@ -201,7 +282,11 @@ schema::4 {
 
     // --- Documentation and Content Edges ---
     E::CONTAINS_CONTENT { From: PROJECT, To: README_CHUNK }
+    E::CONTAINS_CONTENT { From: PROJECT, To: ISSUE_DOC }
+    E::CONTAINS_CONTENT { From: PROJECT, To: PR_DOC }
     E::DOCUMENTS { From: README_CHUNK, To: FUNCTION } // A doc chunk explaining a function
+    E::DOCUMENTS { From: ISSUE, To: ISSUE_DOC }
+    E::DOCUMENTS { From: PULL_REQUEST, To: PR_DOC }
     E::EMBEDS { From: FUNCTION, To: CODE_CHUNK }
     E::EMBEDS { From: CLASS, To: CODE_CHUNK }
 }

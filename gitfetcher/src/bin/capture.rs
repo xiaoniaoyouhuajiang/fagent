@@ -48,6 +48,9 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .try_init();
+
     let args = Args::parse();
     run(args).await
 }
@@ -63,15 +66,23 @@ async fn run(args: Args) -> Result<()> {
         .or_else(|| std::env::var("GITHUB_TOKEN").ok())
         .context("GitHub token must be provided via --token or GITHUB_TOKEN")?;
 
+    log::info!(
+        "Starting capture with params: {}",
+        params_value.to_string().replace('\n', "")
+    );
+
     let fetcher = GitFetcher::with_default_client(Some(token))
         .context("failed to initialize GitFetcher client")?;
 
+    log::info!("Fetching repository snapshot …");
     let response = fetcher
         .fetch(params_value.clone(), Arc::new(NullEmbeddingProvider))
         .await
         .context("fetcher execution failed")?;
 
+    log::info!("Fetch completed, persisting datasets to {:?}", args.output_dir);
     persist_response(&args.output_dir, &params_value, response, args.emit_json)?;
+    log::info!("Capture finished successfully");
     Ok(())
 }
 

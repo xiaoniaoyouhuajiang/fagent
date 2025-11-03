@@ -151,6 +151,37 @@ async function runSync() {
             }
         }
 
+        if (fetcher.toLowerCase() === "gitfetcher") {
+            const includeIssues = $("#include-issues");
+            const includePulls = $("#include-pulls");
+            const includeDevelopers = $("#include-developers");
+            const docLevelOnly = $("#doc-level-only");
+            const touchesMode = $("#touches-mode");
+            const representativeLimit = $("#representative-limit");
+
+            if (includeIssues) {
+                params.include_issues = includeIssues.checked;
+            }
+            if (includePulls) {
+                params.include_pulls = includePulls.checked;
+            }
+            if (includeDevelopers) {
+                params.include_developers = includeDevelopers.checked;
+            }
+            if (docLevelOnly) {
+                params.doc_level_only = docLevelOnly.checked;
+            }
+            if (touchesMode && touchesMode.value) {
+                params.touches_mode = touchesMode.value;
+            }
+            if (representativeLimit) {
+                const limitValue = Number(representativeLimit.value);
+                if (!Number.isNaN(limitValue) && limitValue > 0) {
+                    params.representative_comment_limit = Math.floor(limitValue);
+                }
+            }
+        }
+
         let targets = [];
         if (syncTargetsInput) {
             const rawTargets = syncTargetsInput.value.trim();

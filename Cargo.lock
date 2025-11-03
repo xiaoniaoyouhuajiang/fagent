@@ -3202,6 +3202,7 @@ dependencies = [
  "chrono",
  "clap",
  "deltalake",
+ "env_logger",
  "fstorage",
  "git2",
  "log",

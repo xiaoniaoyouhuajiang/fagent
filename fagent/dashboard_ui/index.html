@@ -61,6 +61,33 @@
                     <input id="sync-budget-value" type="number" min="1" value="100" />
                 </label>
             </div>
+            <div class="sync-options">
+                <h4>GitFetcher 选项</h4>
+                <label class="inline">
+                    <input type="checkbox" id="include-issues" checked /> 拉取 Issues
+                </label>
+                <label class="inline">
+                    <input type="checkbox" id="include-pulls" checked /> 拉取 Pull Requests
+                </label>
+                <label class="inline">
+                    <input type="checkbox" id="include-developers" checked /> 写入 Developer 节点
+                </label>
+                <label class="inline">
+                    <input type="checkbox" id="doc-level-only" checked /> 仅生成 Doc 级向量
+                </label>
+                <label>
+                    代表性评论数量
+                    <input id="representative-limit" type="number" min="1" value="8" />
+                </label>
+                <label>
+                    Touches 模式
+                    <select id="touches-mode">
+                        <option value="none" selected>关闭</option>
+                        <option value="dir_topk">目录 Top-K</option>
+                        <option value="hot_topk">热点 Top-K</option>
+                    </select>
+                </label>
+            </div>
             <label class="stack">
                 Fetch Params (JSON)
                 <textarea id="sync-params" rows="4" placeholder='{"mode":"repo_snapshot","repo":"owner/name"}'></textarea>

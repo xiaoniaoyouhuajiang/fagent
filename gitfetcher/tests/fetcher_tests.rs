@@ -5,13 +5,18 @@ use chrono::{TimeZone, Utc};
 use fstorage::{
     embedding::NullEmbeddingProvider,
     fetch::{FetchResponse, Fetchable, Fetcher},
-    schemas::generated_schemas::{Commit, HasVersion, IsCommit, Project, ReadmeChunk, Version},
+    schemas::generated_schemas::{
+        Commit, HasIssue, HasPr, HasVersion, IsCommit, Issue, IssueDoc, Label, OpenedIssue,
+        OpenedPr, PrDoc, Project, PullRequest, ReadmeChunk, RelatesTo, Version,
+    },
 };
 use git2::{Repository, Signature};
 use gitfetcher::{
     client::{GitHubService, ProbeMetadata},
     models::{
-        CommitInfo, ReadmeContent, RepoSnapshot, RepositoryInfo, ResolvedRevision, SearchRepository,
+        CommentInfo, CommentKind, CommitInfo, DeveloperProfile, IssueInfo, IssueRelation,
+        LabelInfo, PullRequestInfo, ReactionSummary, ReadmeContent, RepoSnapshot, RepositoryInfo,
+        ResolvedRevision, SearchRepository,
     },
     params::{RepoSnapshotParams, SearchRepoParams},
     GitFetcher,
@@ -84,11 +89,140 @@ fn sample_snapshot() -> RepoSnapshot {
         source_file: "README.md".into(),
     };
 
+    let developer = DeveloperProfile {
+        platform: "github".into(),
+        account_id: "1".into(),
+        login: "octocat".into(),
+        name: Some("The Octocat".into()),
+        company: Some("GitHub".into()),
+        followers: Some(42),
+        following: Some(7),
+        location: Some("Internet".into()),
+        email: None,
+        created_at: None,
+        updated_at: None,
+    };
+
+    let issue_created_at = Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap();
+    let issue_comment = CommentInfo {
+        id: 101,
+        body: "Looks good to me".into(),
+        body_text: "Looks good to me".into(),
+        author_login: Some("octocat".into()),
+        author_id: Some("1".into()),
+        author_association: Some("OWNER".into()),
+        created_at: issue_created_at,
+        updated_at: Some(issue_created_at),
+        reactions: ReactionSummary::default(),
+        is_bot: false,
+        kind: CommentKind::Issue,
+        in_reply_to_id: None,
+        review_state: None,
+        path: None,
+        position: None,
+    };
+
+    let issues = vec![IssueInfo {
+        project_url: repository.html_url.clone(),
+        number: 1,
+        title: "Sample issue".into(),
+        body: Some("There is a small bug in the README".into()),
+        state: "open".into(),
+        author_login: Some("octocat".into()),
+        author_id: Some("1".into()),
+        created_at: issue_created_at,
+        updated_at: Some(issue_created_at),
+        closed_at: None,
+        comments_count: 1,
+        is_locked: false,
+        milestone: None,
+        assignees: vec!["octocat".into()],
+        labels: vec![LabelInfo {
+            name: "bug".into(),
+            color: Some("ff0000".into()),
+            description: None,
+        }],
+        reactions: ReactionSummary::default(),
+        comments: vec![issue_comment],
+        representative_comment_ids: vec![101],
+        representative_digest_text: Some("Looks good to me".into()),
+    }];
+
+    let pr_created_at = Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap();
+    let pr_issue_comment = CommentInfo {
+        id: 201,
+        body: "Implements the requested change".into(),
+        body_text: "Implements the requested change".into(),
+        author_login: Some("octocat".into()),
+        author_id: Some("1".into()),
+        author_association: Some("OWNER".into()),
+        created_at: pr_created_at,
+        updated_at: Some(pr_created_at),
+        reactions: ReactionSummary::default(),
+        is_bot: false,
+        kind: CommentKind::Issue,
+        in_reply_to_id: None,
+        review_state: None,
+        path: None,
+        position: None,
+    };
+
+    let pull_requests = vec![PullRequestInfo {
+        project_url: repository.html_url.clone(),
+        number: 42,
+        title: "Add greeting function".into(),
+        body: Some("This PR adds a greeting function and closes #1".into()),
+        state: "open".into(),
+        draft: false,
+        author_login: Some("octocat".into()),
+        author_id: Some("1".into()),
+        created_at: pr_created_at,
+        updated_at: Some(pr_created_at),
+        closed_at: None,
+        merged: false,
+        merged_at: None,
+        merged_by: None,
+        additions: Some(10),
+        deletions: Some(2),
+        changed_files: Some(3),
+        commits: Some(1),
+        base_ref: Some("main".into()),
+        head_ref: Some("feature".into()),
+        base_sha: Some("abc123".into()),
+        head_sha: Some("def456".into()),
+        is_cross_repo: false,
+        comments_count: 1,
+        review_comments_count: 0,
+        labels: vec![LabelInfo {
+            name: "enhancement".into(),
+            color: Some("10b981".into()),
+            description: None,
+        }],
+        assignees: vec!["octocat".into()],
+        reactions: ReactionSummary::default(),
+        issue_comments: vec![pr_issue_comment],
+        review_comments: Vec::new(),
+        representative_comment_ids: vec![201],
+        representative_digest_text: Some("Implements the requested change".into()),
+        related_issues: vec![IssueRelation {
+            owner: repository.owner.clone(),
+            repo: repository.name.clone(),
+            number: 1,
+            link_type: "closes".into(),
+            strength: 3,
+            origin: "pr_body".into(),
+            cross_repo: false,
+        }],
+    }];
+
     RepoSnapshot {
         repository,
         revision,
         commit,
         readme: Some(readme),
+        developers: vec![developer],
+        issues,
+        pull_requests,
     }
 }
 
@@ -178,6 +312,9 @@ fn snapshot_with_local_repo() -> (TempDir, RepoSnapshot) {
         revision,
         commit,
         readme: None,
+        developers: Vec::new(),
+        issues: Vec::new(),
+        pull_requests: Vec::new(),
     };
 
     (temp_dir, snapshot)
@@ -202,19 +339,27 @@ async fn repo_snapshot_fetch_builds_graph() {
 
     match response {
         FetchResponse::GraphData(graph) => {
-            let mut entity_types: Vec<_> = graph
+            let entity_types: std::collections::HashSet<_> = graph
                 .entities
                 .iter()
                 .map(|entity| entity.entity_type_any())
                 .collect();
-            entity_types.sort();
-            assert_eq!(entity_types.len(), 6);
-            assert!(entity_types.contains(&Commit::ENTITY_TYPE));
-            assert!(entity_types.contains(&HasVersion::ENTITY_TYPE));
-            assert!(entity_types.contains(&IsCommit::ENTITY_TYPE));
-            assert!(entity_types.contains(&Project::ENTITY_TYPE));
-            assert!(entity_types.contains(&Version::ENTITY_TYPE));
-            assert!(entity_types.contains(&ReadmeChunk::ENTITY_TYPE));
+            assert!(entity_types.contains(Commit::ENTITY_TYPE));
+            assert!(entity_types.contains(Project::ENTITY_TYPE));
+            assert!(entity_types.contains(Version::ENTITY_TYPE));
+            assert!(entity_types.contains(ReadmeChunk::ENTITY_TYPE));
+            assert!(entity_types.contains(Issue::ENTITY_TYPE));
+            assert!(entity_types.contains(PullRequest::ENTITY_TYPE));
+            assert!(entity_types.contains(IssueDoc::ENTITY_TYPE));
+            assert!(entity_types.contains(PrDoc::ENTITY_TYPE));
+            assert!(entity_types.contains(Label::ENTITY_TYPE));
+            assert!(entity_types.contains(HasVersion::ENTITY_TYPE));
+            assert!(entity_types.contains(IsCommit::ENTITY_TYPE));
+            assert!(entity_types.contains(HasIssue::ENTITY_TYPE));
+            assert!(entity_types.contains(HasPr::ENTITY_TYPE));
+            assert!(entity_types.contains(OpenedIssue::ENTITY_TYPE));
+            assert!(entity_types.contains(OpenedPr::ENTITY_TYPE));
+            assert!(entity_types.contains(RelatesTo::ENTITY_TYPE));
 
             let readme_batches = graph
                 .entities
@@ -226,6 +371,20 @@ async fn repo_snapshot_fetch_builds_graph() {
                 .to_record_batch_any()
                 .expect("readme batch convertible");
             assert_eq!(readme_batch.num_rows(), 1);
+
+            let issue_doc_count = graph
+                .entities
+                .iter()
+                .filter(|entity| entity.entity_type_any() == IssueDoc::ENTITY_TYPE)
+                .count();
+            assert_eq!(issue_doc_count, 1);
+
+            let pr_doc_count = graph
+                .entities
+                .iter()
+                .filter(|entity| entity.entity_type_any() == PrDoc::ENTITY_TYPE)
+                .count();
+            assert_eq!(pr_doc_count, 1);
         }
         _ => panic!("unexpected response"),
     }

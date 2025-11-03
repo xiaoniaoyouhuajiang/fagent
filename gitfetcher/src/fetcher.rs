@@ -48,6 +48,18 @@ fn edge_dataset<T: Fetchable>() -> ProducedDataset {
     }
 }
 
+fn vector_dataset<T: Fetchable>() -> ProducedDataset {
+    ProducedDataset {
+        kind: "vector",
+        name: T::ENTITY_TYPE.to_string(),
+        table_path: T::table_name(),
+        primary_keys: T::primary_keys()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect(),
+    }
+}
+
 pub struct GitFetcher {
     client: Arc<dyn GitHubService>,
 }
@@ -71,8 +83,22 @@ impl GitFetcher {
             node_dataset::<schemas::Project>(),
             node_dataset::<schemas::Version>(),
             node_dataset::<schemas::Commit>(),
+            node_dataset::<schemas::Developer>(),
+            node_dataset::<schemas::Issue>(),
+            node_dataset::<schemas::PullRequest>(),
+            node_dataset::<schemas::Label>(),
             edge_dataset::<schemas::HasVersion>(),
             edge_dataset::<schemas::IsCommit>(),
+            edge_dataset::<schemas::HasIssue>(),
+            edge_dataset::<schemas::HasPr>(),
+            edge_dataset::<schemas::OpenedIssue>(),
+            edge_dataset::<schemas::OpenedPr>(),
+            edge_dataset::<schemas::RelatesTo>(),
+            edge_dataset::<schemas::ImplementsPr>(),
+            edge_dataset::<schemas::HasLabel>(),
+            edge_dataset::<schemas::AssignedTo>(),
+            edge_dataset::<schemas::Reviewed>(),
+            edge_dataset::<schemas::Mentions>(),
             ProducedDataset {
                 kind: "panel",
                 name: "github_search".to_string(),
@@ -100,6 +126,10 @@ impl GitFetcher {
             edge_dataset::<schemas::Implements>(),
             edge_dataset::<schemas::NestedIn>(),
             edge_dataset::<schemas::Imports>(),
+            vector_dataset::<schemas::ReadmeChunk>(),
+            vector_dataset::<schemas::CodeChunk>(),
+            vector_dataset::<schemas::IssueDoc>(),
+            vector_dataset::<schemas::PrDoc>(),
         ]);
 
         FetcherCapability {
@@ -114,6 +144,12 @@ impl GitFetcher {
                     "rev": { "type": "string", "description": "Branch, tag, or commit SHA" },
                     "include_code": { "type": "boolean" },
                     "include_readme": { "type": "boolean" },
+                    "include_issues": { "type": "boolean" },
+                    "include_pulls": { "type": "boolean" },
+                    "include_developers": { "type": "boolean" },
+                    "doc_level_only": { "type": "boolean", "description": "When true, only issue/pr doc vectors are produced (no comment-level chunks)" },
+                    "touches_mode": { "type": "string", "enum": ["none", "dir_topk", "hot_topk"] },
+                    "representative_comment_limit": { "type": "integer", "minimum": 1, "maximum": 16 },
                     "query": { "type": "string" },
                     "language": { "type": "string" },
                     "min_stars": { "type": "integer" },
@@ -127,7 +163,7 @@ impl GitFetcher {
             produces,
             default_ttl_secs: Some(6 * 3600),
             examples: vec![
-                json!({"mode": "repo_snapshot", "repo": "rust-lang/rust", "include_code": false}),
+                json!({"mode": "repo_snapshot", "repo": "rust-lang/rust", "include_code": false, "include_issues": true, "include_pulls": true, "doc_level_only": true}),
                 json!({"mode": "search_repo", "query": "language:rust compiler", "min_stars": 5000}),
             ],
         }

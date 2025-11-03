@@ -15,9 +15,11 @@ use fstorage::{
     fetch::Fetchable,
     fetch::GraphData,
     schemas::generated_schemas::{
-        Calls, Class, CodeChunk, Commit, Contains, DataModel, DependsOn, Endpoint, File, Function,
-        Handler, HasVersion, Implements, Imports, IsCommit, Library, NestedIn, Operand, ParentOf,
-        Project, ReadmeChunk, Test, Trait, Uses, Variable, Version,
+        Calls, Class, CodeChunk, Commit, Contains, DataModel, DependsOn, Developer,
+        Endpoint, File, Function, Handler, HasIssue, HasLabel, HasPr, HasVersion, Implements,
+        Imports, IsCommit, Issue, IssueDoc, Label, Library, NestedIn, OpenedIssue,
+        OpenedPr, Operand, ParentOf, Project, PullRequest, PrDoc, ReadmeChunk, RelatesTo, Test,
+        Trait, Uses, Variable, Version,
     },
     utils::id::{stable_edge_id_u128, stable_node_id_u128},
 };
@@ -25,7 +27,10 @@ use uuid::Uuid;
 
 use crate::{
     code_workspace::{prepare_workspace, WorkspaceConfig},
-    models::{RepoSnapshot, RepositoryInfo, SearchRepository},
+    models::{
+        DeveloperProfile, IssueInfo, LabelInfo, PullRequestInfo, RepoSnapshot, RepositoryInfo,
+        SearchRepository,
+    },
     params::RepoSnapshotParams,
 };
 
@@ -97,6 +102,46 @@ pub async fn build_repo_snapshot_graph(
         created_at: Some(commit.authored_at),
         updated_at: Some(commit.authored_at),
     }]);
+
+    let mut developer_node_ids = HashMap::new();
+    if params.include_developers {
+        add_developer_nodes(&mut graph, &snapshot.developers, &mut developer_node_ids);
+    }
+
+    let mut issue_node_index: HashMap<(String, i64), String> = HashMap::new();
+    let mut label_node_ids: HashMap<String, String> = HashMap::new();
+
+    if params.include_issues && !snapshot.issues.is_empty() {
+        add_issues_to_graph(
+            &mut graph,
+            snapshot,
+            params,
+            &project_url,
+            &project_node_id,
+            repo,
+            &mut developer_node_ids,
+            &mut label_node_ids,
+            &mut issue_node_index,
+            embedding_provider.clone(),
+        )
+        .await?;
+    }
+
+    if params.include_pulls && !snapshot.pull_requests.is_empty() {
+        add_pull_requests_to_graph(
+            &mut graph,
+            snapshot,
+            params,
+            &project_url,
+            &project_node_id,
+            repo,
+            &mut developer_node_ids,
+            &mut label_node_ids,
+            &issue_node_index,
+            embedding_provider.clone(),
+        )
+        .await?;
+    }
 
     if params.include_readme {
         if let Some(readme) = &snapshot.readme {
@@ -1275,6 +1320,565 @@ fn make_imports(from: &NodeDescriptor, to: &NodeDescriptor, created_at: DateTime
         to_node_type: Some(base.to_node_type),
         created_at: base.created_at,
         updated_at: None,
+    }
+}
+
+fn add_developer_nodes(
+    graph: &mut GraphData,
+    developers: &[DeveloperProfile],
+    developer_node_ids: &mut HashMap<String, String>,
+) {
+    for developer in developers {
+        if developer.platform.is_empty()
+            || developer.account_id.is_empty()
+            || developer.login.is_empty()
+        {
+            continue;
+        }
+
+        let key = developer_key(&developer.platform, &developer.account_id, &developer.login);
+        if developer_node_ids.contains_key(&key) {
+            continue;
+        }
+
+        let node_id = uuid_from_node(
+            Developer::ENTITY_TYPE,
+            &[
+                ("platform", developer.platform.clone()),
+                ("account_id", developer.account_id.clone()),
+                ("login", developer.login.clone()),
+            ],
+        );
+        developer_node_ids.insert(key, node_id.clone());
+
+        graph.add_entities(vec![Developer {
+            platform: Some(developer.platform.clone()),
+            account_id: Some(developer.account_id.clone()),
+            login: Some(developer.login.clone()),
+            name: developer.name.clone(),
+            company: developer.company.clone(),
+            followers: developer.followers.map(|v| v as i64),
+            following: developer.following.map(|v| v as i64),
+            location: developer.location.clone(),
+            email: developer.email.clone(),
+            created_at: developer.created_at,
+            updated_at: developer.updated_at,
+        }]);
+    }
+}
+
+async fn add_issues_to_graph(
+    graph: &mut GraphData,
+    snapshot: &RepoSnapshot,
+    params: &RepoSnapshotParams,
+    project_url: &str,
+    project_node_id: &str,
+    repo: &RepositoryInfo,
+    developer_node_ids: &mut HashMap<String, String>,
+    label_node_ids: &mut HashMap<String, String>,
+    issue_node_index: &mut HashMap<(String, i64), String>,
+    embedding_provider: Arc<dyn EmbeddingProvider>,
+) -> StorageResult<()> {
+    let mut doc_texts: Vec<String> = Vec::new();
+    let mut doc_meta: Vec<(i64, String, DateTime<Utc>, DateTime<Utc>, Option<DateTime<Utc>>)> =
+        Vec::new();
+
+    let embedding_model = detect_embedding_model_from_env();
+
+    for issue in &snapshot.issues {
+        let issue_node_id = uuid_from_node(
+            Issue::ENTITY_TYPE,
+            &[
+                ("project_url", project_url.to_string()),
+                ("number", issue.number.to_string()),
+            ],
+        );
+        issue_node_index.insert((project_url.to_string(), issue.number), issue_node_id.clone());
+
+        let assignees_json =
+            serde_json::to_string(&issue.assignees).unwrap_or_else(|_| "[]".to_string());
+        let label_names: Vec<String> =
+            issue.labels.iter().map(|label| label.name.clone()).collect();
+        let labels_json =
+            serde_json::to_string(&label_names).unwrap_or_else(|_| "[]".to_string());
+        let representative_ids_json = serde_json::to_string(&issue.representative_comment_ids)
+            .unwrap_or_else(|_| "[]".to_string());
+
+        graph.add_entities(vec![Issue {
+            project_url: Some(project_url.to_string()),
+            number: Some(issue.number),
+            title: Some(issue.title.clone()),
+            body: issue.body.clone(),
+            state: Some(issue.state.clone()),
+            author_login: issue.author_login.clone(),
+            author_id: issue.author_id.clone(),
+            created_at: Some(issue.created_at),
+            updated_at: issue.updated_at,
+            closed_at: issue.closed_at,
+            comments_count: Some(issue.comments_count as i64),
+            is_locked: Some(issue.is_locked),
+            milestone: issue.milestone.clone(),
+            assignees: Some(assignees_json),
+            labels: Some(labels_json),
+            reactions_plus_one: Some(issue.reactions.plus_one as i64),
+            reactions_heart: Some(issue.reactions.heart as i64),
+            reactions_hooray: Some(issue.reactions.hooray as i64),
+            reactions_eyes: Some(issue.reactions.eyes as i64),
+            reactions_rocket: Some(issue.reactions.rocket as i64),
+            reactions_confused: Some(issue.reactions.confused as i64),
+            representative_comment_ids: Some(representative_ids_json),
+            representative_digest_text: issue.representative_digest_text.clone(),
+        }]);
+
+        graph.add_entities(vec![HasIssue {
+            id: Some(uuid_from_edge(
+                HasIssue::ENTITY_TYPE,
+                project_node_id,
+                &issue_node_id,
+            )),
+            from_node_id: Some(project_node_id.to_string()),
+            to_node_id: Some(issue_node_id.clone()),
+            from_node_type: Some(Project::ENTITY_TYPE.to_string()),
+            to_node_type: Some(Issue::ENTITY_TYPE.to_string()),
+            created_at: Some(issue.created_at),
+            updated_at: issue.updated_at,
+        }]);
+
+        if params.include_developers {
+            if let Some(developer_id) = lookup_developer(
+                developer_node_ids,
+                issue.author_id.as_deref(),
+                issue.author_login.as_deref(),
+            ) {
+                graph.add_entities(vec![OpenedIssue {
+                    id: Some(uuid_from_edge(
+                        OpenedIssue::ENTITY_TYPE,
+                        &developer_id,
+                        &issue_node_id,
+                    )),
+                    from_node_id: Some(developer_id),
+                    to_node_id: Some(issue_node_id.clone()),
+                    from_node_type: Some(Developer::ENTITY_TYPE.to_string()),
+                    to_node_type: Some(Issue::ENTITY_TYPE.to_string()),
+                    created_at: Some(issue.created_at),
+                    updated_at: issue.updated_at,
+                }]);
+            }
+        }
+
+        for label in &issue.labels {
+            let label_node_id = ensure_label_node(graph, label_node_ids, project_url, label);
+            graph.add_entities(vec![HasLabel {
+                id: Some(uuid_from_edge(
+                    HasLabel::ENTITY_TYPE,
+                    &issue_node_id,
+                    &label_node_id,
+                )),
+                from_node_id: Some(issue_node_id.clone()),
+                to_node_id: Some(label_node_id),
+                from_node_type: Some(Issue::ENTITY_TYPE.to_string()),
+                to_node_type: Some(Label::ENTITY_TYPE.to_string()),
+                created_at: Some(issue.created_at),
+                updated_at: issue.updated_at,
+            }]);
+        }
+
+        if let Some(doc_text) = build_issue_doc_text(issue, repo) {
+            let source_updated_at = issue.updated_at.unwrap_or(issue.created_at);
+            doc_meta.push((
+                issue.number,
+                issue_node_id.clone(),
+                source_updated_at,
+                issue.created_at,
+                issue.updated_at,
+            ));
+            doc_texts.push(doc_text);
+        }
+    }
+
+    if !doc_texts.is_empty() {
+        let embeddings: Vec<Vec<f32>> = embedding_provider
+            .embed(doc_texts.clone())
+            .await?
+            .into_iter()
+            .map(|values| values.into_iter().map(|v| v as f32).collect())
+            .collect();
+
+        let mut issue_docs = Vec::new();
+        for (idx, (number, _, source_updated_at, created_at, updated_at)) in
+            doc_meta.into_iter().enumerate()
+        {
+            let embedding = embeddings
+                .get(idx)
+                .cloned()
+                .filter(|vector| !vector.is_empty());
+            let embedding_model_value = embedding.as_ref().and_then(|_| embedding_model.clone());
+            let text = doc_texts
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| String::new());
+
+            issue_docs.push(IssueDoc {
+                id: None,
+                project_url: Some(project_url.to_string()),
+                issue_number: Some(number),
+                source_updated_at: Some(source_updated_at),
+                text: Some(text.clone()),
+                embedding,
+                embedding_model: embedding_model_value,
+                embedding_id: Some(format!(
+                    "issue-doc://{}/{}#doc#0",
+                    repo.full_name, number
+                )),
+                token_count: approximate_token_count(&text),
+                chunk_order: Some(0),
+                created_at: Some(created_at),
+                updated_at,
+            });
+        }
+
+        if !issue_docs.is_empty() {
+            graph.add_entities(issue_docs);
+        }
+    }
+
+    Ok(())
+}
+
+async fn add_pull_requests_to_graph(
+    graph: &mut GraphData,
+    snapshot: &RepoSnapshot,
+    params: &RepoSnapshotParams,
+    project_url: &str,
+    project_node_id: &str,
+    repo: &RepositoryInfo,
+    developer_node_ids: &mut HashMap<String, String>,
+    label_node_ids: &mut HashMap<String, String>,
+    issue_node_index: &HashMap<(String, i64), String>,
+    embedding_provider: Arc<dyn EmbeddingProvider>,
+) -> StorageResult<()> {
+    let mut doc_texts: Vec<String> = Vec::new();
+    let mut doc_meta: Vec<(i64, DateTime<Utc>, DateTime<Utc>, Option<DateTime<Utc>>)> = Vec::new();
+    let embedding_model = detect_embedding_model_from_env();
+
+    for pr in &snapshot.pull_requests {
+        let pr_node_id = uuid_from_node(
+            PullRequest::ENTITY_TYPE,
+            &[
+                ("project_url", project_url.to_string()),
+                ("number", pr.number.to_string()),
+            ],
+        );
+
+        let representative_ids_json = serde_json::to_string(&pr.representative_comment_ids)
+            .unwrap_or_else(|_| "[]".to_string());
+        let related_issues_json = serde_json::to_string(&pr.related_issues)
+            .unwrap_or_else(|_| "[]".to_string());
+
+        graph.add_entities(vec![PullRequest {
+            project_url: Some(project_url.to_string()),
+            number: Some(pr.number),
+            title: Some(pr.title.clone()),
+            body: pr.body.clone(),
+            state: Some(pr.state.clone()),
+            draft: Some(pr.draft),
+            author_login: pr.author_login.clone(),
+            author_id: pr.author_id.clone(),
+            created_at: Some(pr.created_at),
+            updated_at: pr.updated_at,
+            closed_at: pr.closed_at,
+            merged: Some(pr.merged),
+            merged_at: pr.merged_at,
+            merged_by: pr.merged_by.clone(),
+            additions: pr.additions.map(|v| v as i64),
+            deletions: pr.deletions.map(|v| v as i64),
+            changed_files: pr.changed_files.map(|v| v as i64),
+            commits: pr.commits.map(|v| v as i64),
+            base_ref: pr.base_ref.clone(),
+            head_ref: pr.head_ref.clone(),
+            base_sha: pr.base_sha.clone(),
+            head_sha: pr.head_sha.clone(),
+            is_cross_repo: Some(pr.is_cross_repo),
+            review_comments_count: Some(pr.review_comments_count as i64),
+            comments_count: Some(pr.comments_count as i64),
+            representative_comment_ids: Some(representative_ids_json),
+            representative_digest_text: pr.representative_digest_text.clone(),
+            related_issues: Some(related_issues_json),
+        }]);
+
+        graph.add_entities(vec![HasPr {
+            id: Some(uuid_from_edge(
+                HasPr::ENTITY_TYPE,
+                project_node_id,
+                &pr_node_id,
+            )),
+            from_node_id: Some(project_node_id.to_string()),
+            to_node_id: Some(pr_node_id.clone()),
+            from_node_type: Some(Project::ENTITY_TYPE.to_string()),
+            to_node_type: Some(PullRequest::ENTITY_TYPE.to_string()),
+            created_at: Some(pr.created_at),
+            updated_at: pr.updated_at,
+        }]);
+
+        if params.include_developers {
+            if let Some(dev_id) = lookup_developer(
+                developer_node_ids,
+                pr.author_id.as_deref(),
+                pr.author_login.as_deref(),
+            ) {
+                graph.add_entities(vec![OpenedPr {
+                    id: Some(uuid_from_edge(
+                        OpenedPr::ENTITY_TYPE,
+                        &dev_id,
+                        &pr_node_id,
+                    )),
+                    from_node_id: Some(dev_id),
+                    to_node_id: Some(pr_node_id.clone()),
+                    from_node_type: Some(Developer::ENTITY_TYPE.to_string()),
+                    to_node_type: Some(PullRequest::ENTITY_TYPE.to_string()),
+                    created_at: Some(pr.created_at),
+                    updated_at: pr.updated_at,
+                }]);
+            }
+        }
+
+        for label in &pr.labels {
+            let label_node_id = ensure_label_node(graph, label_node_ids, project_url, label);
+            graph.add_entities(vec![HasLabel {
+                id: Some(uuid_from_edge(
+                    HasLabel::ENTITY_TYPE,
+                    &pr_node_id,
+                    &label_node_id,
+                )),
+                from_node_id: Some(pr_node_id.clone()),
+                to_node_id: Some(label_node_id),
+                from_node_type: Some(PullRequest::ENTITY_TYPE.to_string()),
+                to_node_type: Some(Label::ENTITY_TYPE.to_string()),
+                created_at: Some(pr.created_at),
+                updated_at: pr.updated_at,
+            }]);
+        }
+
+        if let Some(doc_text) = build_pr_doc_text(pr, repo) {
+            let source_updated_at = pr.updated_at.unwrap_or(pr.created_at);
+            doc_meta.push((pr.number, source_updated_at, pr.created_at, pr.updated_at));
+            doc_texts.push(doc_text);
+        }
+
+        for relation in &pr.related_issues {
+            if relation.cross_repo {
+                continue;
+            }
+            let key = (project_url.to_string(), relation.number);
+            if let Some(issue_node_id) = issue_node_index.get(&key) {
+                graph.add_entities(vec![RelatesTo {
+                    id: Some(uuid_from_edge(
+                        RelatesTo::ENTITY_TYPE,
+                        &pr_node_id,
+                        issue_node_id,
+                    )),
+                    from_node_id: Some(pr_node_id.clone()),
+                    to_node_id: Some(issue_node_id.clone()),
+                    from_node_type: Some(PullRequest::ENTITY_TYPE.to_string()),
+                    to_node_type: Some(Issue::ENTITY_TYPE.to_string()),
+                    created_at: Some(pr.updated_at.unwrap_or(pr.created_at)),
+                    updated_at: pr.updated_at,
+                }]);
+            }
+        }
+    }
+
+    if !doc_texts.is_empty() {
+        let embeddings: Vec<Vec<f32>> = embedding_provider
+            .embed(doc_texts.clone())
+            .await?
+            .into_iter()
+            .map(|values| values.into_iter().map(|v| v as f32).collect())
+            .collect();
+
+        let mut pr_docs = Vec::new();
+        for (idx, (number, source_updated_at, created_at, updated_at)) in
+            doc_meta.into_iter().enumerate()
+        {
+            let embedding = embeddings
+                .get(idx)
+                .cloned()
+                .filter(|vector| !vector.is_empty());
+            let embedding_model_value = embedding.as_ref().and_then(|_| embedding_model.clone());
+            let text = doc_texts
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| String::new());
+
+            pr_docs.push(PrDoc {
+                id: None,
+                project_url: Some(project_url.to_string()),
+                pr_number: Some(number),
+                source_updated_at: Some(source_updated_at),
+                text: Some(text.clone()),
+                embedding,
+                embedding_model: embedding_model_value,
+                embedding_id: Some(format!(
+                    "pr-doc://{}/{}#doc#0",
+                    repo.full_name, number
+                )),
+                token_count: approximate_token_count(&text),
+                chunk_order: Some(0),
+                created_at: Some(created_at),
+                updated_at,
+            });
+        }
+
+        if !pr_docs.is_empty() {
+            graph.add_entities(pr_docs);
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_label_node(
+    graph: &mut GraphData,
+    label_node_ids: &mut HashMap<String, String>,
+    project_url: &str,
+    label: &LabelInfo,
+) -> String {
+    let key = format!("{}::{}", project_url, label.name.to_lowercase());
+    if let Some(id) = label_node_ids.get(&key) {
+        return id.clone();
+    }
+
+    let node_id = uuid_from_node(
+        Label::ENTITY_TYPE,
+        &[
+            ("project_url", project_url.to_string()),
+            ("name", label.name.clone()),
+        ],
+    );
+    label_node_ids.insert(key, node_id.clone());
+
+    graph.add_entities(vec![Label {
+        project_url: Some(project_url.to_string()),
+        name: Some(label.name.clone()),
+        color: label.color.clone(),
+        description: label.description.clone(),
+    }]);
+
+    node_id
+}
+
+fn developer_key(platform: &str, account_id: &str, login: &str) -> String {
+    format!(
+        "{}::{}::{}",
+        platform.to_lowercase(),
+        account_id,
+        login.to_lowercase()
+    )
+}
+
+fn lookup_developer(
+    developer_node_ids: &HashMap<String, String>,
+    account_id: Option<&str>,
+    login: Option<&str>,
+) -> Option<String> {
+    if let (Some(account), Some(login)) = (account_id, login) {
+        let key = developer_key("github", account, login);
+        if let Some(node_id) = developer_node_ids.get(&key) {
+            return Some(node_id.clone());
+        }
+    }
+
+    if let Some(login) = login {
+        let login_lower = login.to_lowercase();
+        for (key, node_id) in developer_node_ids.iter() {
+            if key
+                .split("::")
+                .last()
+                .map(|value| value == login_lower)
+                .unwrap_or(false)
+            {
+                return Some(node_id.clone());
+            }
+        }
+    }
+
+    None
+}
+
+fn build_issue_doc_text(issue: &IssueInfo, repo: &RepositoryInfo) -> Option<String> {
+    let mut sections = Vec::new();
+    sections.push(format!(
+        "Issue #{} in {}",
+        issue.number, repo.full_name
+    ));
+    sections.push(format!("State: {}", issue.state));
+    if let Some(author) = &issue.author_login {
+        sections.push(format!("Author: {}", author));
+    }
+    if !issue.title.trim().is_empty() {
+        sections.push(format!("Title:\n{}", issue.title));
+    }
+    if let Some(body) = &issue.body {
+        if !body.trim().is_empty() {
+            sections.push(format!("Body:\n{}", body));
+        }
+    }
+    if let Some(digest) = &issue.representative_digest_text {
+        if !digest.trim().is_empty() {
+            sections.push(format!("Representative Comments:\n{}", digest));
+        }
+    }
+
+    let text = sections.join("\n\n");
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn build_pr_doc_text(pr: &PullRequestInfo, repo: &RepositoryInfo) -> Option<String> {
+    let mut sections = Vec::new();
+    sections.push(format!(
+        "Pull Request #{} in {}",
+        pr.number, repo.full_name
+    ));
+    sections.push(format!(
+        "State: {}{}",
+        pr.state,
+        if pr.draft { " (draft)" } else { "" }
+    ));
+    if let Some(author) = &pr.author_login {
+        sections.push(format!("Author: {}", author));
+    }
+    if !pr.title.trim().is_empty() {
+        sections.push(format!("Title:\n{}", pr.title));
+    }
+    if let Some(body) = &pr.body {
+        if !body.trim().is_empty() {
+            sections.push(format!("Body:\n{}", body));
+        }
+    }
+    if let Some(digest) = &pr.representative_digest_text {
+        if !digest.trim().is_empty() {
+            sections.push(format!("Representative Comments:\n{}", digest));
+        }
+    }
+    if let Some(additions) = pr.additions {
+        sections.push(format!("Additions: {}", additions));
+    }
+    if let Some(deletions) = pr.deletions {
+        sections.push(format!("Deletions: {}", deletions));
+    }
+    if let Some(files) = pr.changed_files {
+        sections.push(format!("Changed Files: {}", files));
+    }
+
+    let text = sections.join("\n\n");
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
     }
 }
 

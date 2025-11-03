@@ -41,6 +41,98 @@
           }
         }
       ]
+    },
+    {
+      "vector_entity": "issuedoc",
+      "id_column": "embedding_id",
+      "edges": [
+        {
+          "edge_type": "edge_containscontent",
+          "target_node_type": "issuedoc",
+          "source": {
+            "kind": "primary_key",
+            "entity_type": "project",
+            "mappings": [
+              {
+                "vector_column": "project_url",
+                "primary_key": "url"
+              }
+            ]
+          },
+          "source_node_type": {
+            "kind": "literal",
+            "value": "project"
+          }
+        },
+        {
+          "edge_type": "edge_documents",
+          "target_node_type": "issuedoc",
+          "source": {
+            "kind": "primary_key",
+            "entity_type": "issue",
+            "mappings": [
+              {
+                "vector_column": "project_url",
+                "primary_key": "project_url"
+              },
+              {
+                "vector_column": "issue_number",
+                "primary_key": "number"
+              }
+            ]
+          },
+          "source_node_type": {
+            "kind": "literal",
+            "value": "issue"
+          }
+        }
+      ]
+    },
+    {
+      "vector_entity": "prdoc",
+      "id_column": "embedding_id",
+      "edges": [
+        {
+          "edge_type": "edge_containscontent",
+          "target_node_type": "prdoc",
+          "source": {
+            "kind": "primary_key",
+            "entity_type": "project",
+            "mappings": [
+              {
+                "vector_column": "project_url",
+                "primary_key": "url"
+              }
+            ]
+          },
+          "source_node_type": {
+            "kind": "literal",
+            "value": "project"
+          }
+        },
+        {
+          "edge_type": "edge_documents",
+          "target_node_type": "prdoc",
+          "source": {
+            "kind": "primary_key",
+            "entity_type": "pull_request",
+            "mappings": [
+              {
+                "vector_column": "project_url",
+                "primary_key": "project_url"
+              },
+              {
+                "vector_column": "pr_number",
+                "primary_key": "number"
+              }
+            ]
+          },
+          "source_node_type": {
+            "kind": "literal",
+            "value": "pull_request"
+          }
+        }
+      ]
     }
   ]
 }
