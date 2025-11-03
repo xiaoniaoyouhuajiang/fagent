@@ -11,6 +11,8 @@
 # debug path
 /temp
 /captures
+# trace files
+**/*.trace
 
 /references
 /deps
