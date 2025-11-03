@@ -5,13 +5,13 @@
 ## 概览
 
 - **项目初衷**  
-  构建一个面向智能体的检索栈，让系统能够理解代码和仓库上下文，使得 LLM 助手能够增量获取 Git 数据并稳定回答问题。
+  打造一个围绕“抓取事实”构建的智能体系统。Fetcher 持续抓取外部数据源，`fstorage` 作为存储核心负责将这些事实落盘、索引并对外服务，方便下游的 LLM 智能体可靠检索。
 
 - **核心模块**
-  - `fagent`：编排层，提供 HTTP API 与仪表盘，负责触发同步任务并暴露图谱/检索接口。
-  - `gitfetcher`：抓取层，通过 Octocrab 访问 GitHub，提取仓库元数据、Issue、PR、代码图和向量，输出 `GraphData`。
-  - `fstorage`：存储核心，将数据写入 Delta 冷层与 Helix 热层，维护 schema 元数据、 Catalog offset 以及检索 API。
-  - 配套工具（`capture`、`fstorage_cli`、dashboard）：用于调试、基准数据生成与交互式探索。
+  - `fagent`：编排层，提供 HTTP API 与仪表盘，调度同步任务，分发 fetch 请求，并向智能体暴露图谱/检索接口。
+  - **Fetcher 接口**：可插拔的抓取器实现统一的 `capability` / `probe` / `fetch` API，输出 `GraphData` 或面板数据。`gitfetcher` 是针对 GitHub 的示例实现，未来可扩展到其他数据域。
+  - `fstorage`：面向所有 fetcher 的存储核心，将节点/边/向量写入 Delta 冷层与 Helix 热层，维护 schema 元数据、Catalog offset，并提供与数据源无关的检索接口。
+  - 配套工具（`capture`、`fstorage_cli`、dashboard）：用于测试 fetcher、生成基准数据以及交互式探索知识图谱。
 
 ## 架构说明
 
@@ -26,7 +26,7 @@
   - **Lake**：负责 Delta Lake 的写入与读取，统一使用 `silver/entities/*`、`silver/edges/*`、`silver/vectors/*` 等路径，以批量方式原子写入。
   - **Helix Engine**：热路径图存储，支持低延迟的节点/边/向量查询。
   - **Catalog**：追踪导入 offset、向量索引表与外部锚点，用于增量重放。
-  - **Schema Registry 与 `vector_rules.json`**：以配置驱动向量与边的元数据，保证 ID 稳定并维持通用性。
+  - **Schema Registry 与 `vector_rules.json`**：以配置驱动向量与边的元数据，既保证 ID 稳定，也方便新增的数据模型无需修改核心代码即可适配。
   - **Synchronizer**：负责调度“抓取 → 校验 → 写入 → 更新 offset”的完整流程。
 
 ## 已具备的能力
@@ -45,7 +45,7 @@
 1. 安装依赖（Rust 工具链，可选安装 `cargo-instruments`，以及 Helix 所需依赖）。
 2. 准备工作目录并设置环境变量，例如 `GITHUB_TOKEN`（以及 `USE_LSP`、代理等可选项）。
 3. 运行 `cargo run -p fagent -- dashboard --base-path ./temp`，打开仪表盘触发同步。
-4. 使用 `capture`、`fstorage_cli` 生成基准数据或调试存储内容。
+4. 使用 `capture`、`fstorage_cli` 验证新的 fetcher、生成基准数据或调试存储内容。
 5. 通过 `/graph.html`、`/api/graph` 接口或检索 API 浏览图谱数据。
 
 ---

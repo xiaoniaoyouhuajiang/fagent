@@ -5,13 +5,13 @@
 ## Overview
 
 - **Motivation**  
-  Build an agent-friendly retrieval stack that understands source code and repository context, so LLM-based assistants can ingest Git data, synchronize it incrementally, and answer questions reliably.
+  Build an agent system that reasons over freshly fetched data. Fetchers continuously pull facts from external sources; `fstorage` exists to persist, index, and serve those facts so downstream LLM agents can retrieve them reliably.
 
 - **Key Modules**
-  - `fagent`: orchestrator hosting the HTTP API and dashboard, coordinating sync tasks, and exposing graph/query endpoints.
-  - `gitfetcher`: fetch layer that talks to GitHub via Octocrab, extracts repository metadata, issues, pull requests, code graphs, and vectors, and emits `GraphData`.
-  - `fstorage`: storage core that writes data into Delta Lake (cold) and Helix engine (hot), maintains schema metadata, catalog offsets, and search APIs.
-  - Tooling (`capture`, `fstorage_cli`, dashboard): utilities for debugging, fixture generation, and interactive exploration.
+  - `fagent`: orchestrator hosting the HTTP API and dashboard, coordinating sync tasks, dispatching fetch jobs, and exposing graph/query endpoints to agents.
+  - **Fetcher interface**: pluggable fetchers implement a common API (`capability`, `probe`, `fetch`) and emit `GraphData`/panel data. `gitfetcher` is the reference implementation for GitHub, but additional fetchers can be added for other data domains.
+  - `fstorage`: storage core for all fetchers—writes nodes/edges/vectors into Delta Lake (cold) and Helix engine (hot), tracks schema metadata, catalog offsets, and provides search APIs independent of any single data source.
+  - Tooling (`capture`, `fstorage_cli`, dashboard): utilities for testing fetchers, producing fixtures, and interactively exploring the aggregated knowledge graph.
 
 ## Architecture
 
@@ -26,7 +26,7 @@
   - **Lake**: Delta writer/reader that normalizes table paths such as `silver/entities/*`, `silver/edges/*`, and `silver/vectors/*`, writing batches atomically.
   - **Helix Engine**: hot-path graph store for low-latency node/edge/vector queries.
   - **Catalog**: tracks ingestion offsets, vector index tables, and external anchors for incremental sync planning.
-  - **Schema Registry & `vector_rules.json`**: configuration-driven metadata that keeps vector IDs stable and the pipeline generic.
+  - **Schema Registry & `vector_rules.json`**: configuration-driven metadata that keeps vector IDs stable and allows new entity/edge/vector types introduced by fetchers to be handled without hard-coding.
   - **Synchronizer**: orchestrates fetch → validate → write → offset update for each entity category.
 
 ## Current Capabilities
@@ -45,7 +45,7 @@
 1. Install dependencies (Rust toolchain, optional `cargo-instruments`, Helix prerequisites).
 2. Prepare a workspace and set environment variables such as `GITHUB_TOKEN` (plus `USE_LSP`, proxy settings if needed).
 3. Run `cargo run -p fagent -- dashboard --base-path ./temp` and open the dashboard to trigger syncs.
-4. Use `capture` and `fstorage_cli` to generate fixtures or debug storage contents.
+4. Use `capture` and `fstorage_cli` to generate fixtures, validate new fetchers, or debug storage contents.
 5. Explore graph data through `/graph.html`, `/api/graph` endpoints, or the search APIs.
 
 ---
