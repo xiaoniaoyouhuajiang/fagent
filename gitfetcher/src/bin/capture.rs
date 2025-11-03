@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs::{create_dir_all, File},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
@@ -9,7 +10,10 @@ use anyhow::{Context, Result};
 use arrow_json::ArrayWriter;
 use chrono::Utc;
 use clap::Parser;
-use deltalake::arrow::ipc::writer::FileWriter;
+use deltalake::arrow::{
+    compute::concat_batches, datatypes::SchemaRef, ipc::writer::FileWriter,
+    record_batch::RecordBatch,
+};
 use fstorage::{
     embedding::NullEmbeddingProvider,
     errors::StorageError,
@@ -80,10 +84,20 @@ async fn run(args: Args) -> Result<()> {
         .await
         .context("fetcher execution failed")?;
 
-    log::info!("Fetch completed, persisting datasets to {:?}", args.output_dir);
+    log::info!(
+        "Fetch completed, persisting datasets to {:?}",
+        args.output_dir
+    );
     persist_response(&args.output_dir, &params_value, response, args.emit_json)?;
     log::info!("Capture finished successfully");
     Ok(())
+}
+
+struct AggregatedDataset {
+    category: EntityCategory,
+    entity_type: String,
+    schema: SchemaRef,
+    batches: Vec<RecordBatch>,
 }
 
 fn load_params(args: &Args) -> Result<JsonValue> {
@@ -126,27 +140,59 @@ fn persist_response(
 
     match response {
         FetchResponse::GraphData(mut graph) => {
+            let mut aggregates: HashMap<(EntityCategory, String), AggregatedDataset> =
+                HashMap::new();
+
             for entity in graph.entities.drain(..) {
-                let entity_type = entity.entity_type_any();
                 let category = entity.category_any();
+                let entity_type = entity.entity_type_any().to_string();
                 let batch = entity
                     .to_record_batch_any()
                     .map_err(to_anyhow("failed to convert record batch"))?;
-                let arrow_path =
-                    materialize_record_batch(output_dir, category, entity_type, &batch)?;
+                let schema = batch.schema();
+
+                let entry = aggregates
+                    .entry((category, entity_type.clone()))
+                    .or_insert_with(|| AggregatedDataset {
+                        category,
+                        entity_type: entity_type.clone(),
+                        schema: schema.clone(),
+                        batches: Vec::new(),
+                    });
+
+                if entry.schema.as_ref() != schema.as_ref() {
+                    return Err(anyhow::anyhow!(
+                        "schema mismatch for category '{}' entity '{}'",
+                        category.as_str(),
+                        entity_type
+                    ));
+                }
+
+                entry.batches.push(batch);
+            }
+
+            for dataset in aggregates.into_values() {
+                let combined = concat_batches(&dataset.schema, &dataset.batches)
+                    .map_err(|err| anyhow::anyhow!("failed to concatenate batches: {err}"))?;
+                let arrow_path = materialize_record_batch(
+                    output_dir,
+                    dataset.category,
+                    &dataset.entity_type,
+                    &combined,
+                )?;
                 let json_path = if emit_json {
                     Some(materialize_record_batch_json(
                         output_dir,
-                        category,
-                        entity_type,
-                        &batch,
+                        dataset.category,
+                        &dataset.entity_type,
+                        &combined,
                     )?)
                 } else {
                     None
                 };
                 datasets.push(dataset_entry(
-                    category.as_str(),
-                    entity_type,
+                    dataset.category.as_str(),
+                    &dataset.entity_type,
                     arrow_path,
                     json_path,
                     output_dir,

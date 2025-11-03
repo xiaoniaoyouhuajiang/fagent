@@ -33,8 +33,7 @@ fn main() -> anyhow::Result<()> {
     let ast = parser::HelixParser::parse_source(&content)
         .map_err(|e| anyhow::anyhow!("Parser error: {:?}", e))?;
 
-    let vector_rules_config =
-        load_vector_rules(Path::new("../helixdb-cfg/vector_rules.json"))?;
+    let vector_rules_config = load_vector_rules(Path::new("../helixdb-cfg/vector_rules.json"))?;
 
     let out_dir = env::var_os("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("generated_schemas.rs");
@@ -227,8 +226,7 @@ fn main() -> anyhow::Result<()> {
                             entity_type,
                             mappings,
                         } => {
-                            let mapping_ident =
-                                format!("VECTOR_RULE_MAPPING_{}", mapping_counter);
+                            let mapping_ident = format!("VECTOR_RULE_MAPPING_{}", mapping_counter);
                             mapping_counter += 1;
                             let mapping_values: Vec<String> = mappings
                                 .iter()
@@ -259,10 +257,9 @@ fn main() -> anyhow::Result<()> {
                         VectorSourceNodeTypeConfig::Literal { value } => {
                             format!("VectorSourceTypeRecord::Literal(\"{}\")", value)
                         }
-                        VectorSourceNodeTypeConfig::FromKey { column } => format!(
-                            "VectorSourceTypeRecord::FromKeyPattern(\"{}\")",
-                            column
-                        ),
+                        VectorSourceNodeTypeConfig::FromKey { column } => {
+                            format!("VectorSourceTypeRecord::FromKeyPattern(\"{}\")", column)
+                        }
                     };
 
                     vector_rule_entries.push(format!(

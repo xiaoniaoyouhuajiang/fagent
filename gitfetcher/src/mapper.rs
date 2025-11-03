@@ -15,11 +15,10 @@ use fstorage::{
     fetch::Fetchable,
     fetch::GraphData,
     schemas::generated_schemas::{
-        Calls, Class, CodeChunk, Commit, Contains, DataModel, DependsOn, Developer,
-        Endpoint, File, Function, Handler, HasIssue, HasLabel, HasPr, HasVersion, Implements,
-        Imports, IsCommit, Issue, IssueDoc, Label, Library, NestedIn, OpenedIssue,
-        OpenedPr, Operand, ParentOf, Project, PullRequest, PrDoc, ReadmeChunk, RelatesTo, Test,
-        Trait, Uses, Variable, Version,
+        Calls, Class, CodeChunk, Commit, Contains, DataModel, DependsOn, Developer, Endpoint, File,
+        Function, Handler, HasIssue, HasLabel, HasPr, HasVersion, Implements, Imports, IsCommit,
+        Issue, IssueDoc, Label, Library, NestedIn, OpenedIssue, OpenedPr, Operand, ParentOf, PrDoc,
+        Project, PullRequest, ReadmeChunk, RelatesTo, Test, Trait, Uses, Variable, Version,
     },
     utils::id::{stable_edge_id_u128, stable_node_id_u128},
 };
@@ -1380,8 +1379,13 @@ async fn add_issues_to_graph(
     embedding_provider: Arc<dyn EmbeddingProvider>,
 ) -> StorageResult<()> {
     let mut doc_texts: Vec<String> = Vec::new();
-    let mut doc_meta: Vec<(i64, String, DateTime<Utc>, DateTime<Utc>, Option<DateTime<Utc>>)> =
-        Vec::new();
+    let mut doc_meta: Vec<(
+        i64,
+        String,
+        DateTime<Utc>,
+        DateTime<Utc>,
+        Option<DateTime<Utc>>,
+    )> = Vec::new();
 
     let embedding_model = detect_embedding_model_from_env();
 
@@ -1393,14 +1397,19 @@ async fn add_issues_to_graph(
                 ("number", issue.number.to_string()),
             ],
         );
-        issue_node_index.insert((project_url.to_string(), issue.number), issue_node_id.clone());
+        issue_node_index.insert(
+            (project_url.to_string(), issue.number),
+            issue_node_id.clone(),
+        );
 
         let assignees_json =
             serde_json::to_string(&issue.assignees).unwrap_or_else(|_| "[]".to_string());
-        let label_names: Vec<String> =
-            issue.labels.iter().map(|label| label.name.clone()).collect();
-        let labels_json =
-            serde_json::to_string(&label_names).unwrap_or_else(|_| "[]".to_string());
+        let label_names: Vec<String> = issue
+            .labels
+            .iter()
+            .map(|label| label.name.clone())
+            .collect();
+        let labels_json = serde_json::to_string(&label_names).unwrap_or_else(|_| "[]".to_string());
         let representative_ids_json = serde_json::to_string(&issue.representative_comment_ids)
             .unwrap_or_else(|_| "[]".to_string());
 
@@ -1513,10 +1522,7 @@ async fn add_issues_to_graph(
                 .cloned()
                 .filter(|vector| !vector.is_empty());
             let embedding_model_value = embedding.as_ref().and_then(|_| embedding_model.clone());
-            let text = doc_texts
-                .get(idx)
-                .cloned()
-                .unwrap_or_else(|| String::new());
+            let text = doc_texts.get(idx).cloned().unwrap_or_else(|| String::new());
 
             issue_docs.push(IssueDoc {
                 id: None,
@@ -1526,10 +1532,7 @@ async fn add_issues_to_graph(
                 text: Some(text.clone()),
                 embedding,
                 embedding_model: embedding_model_value,
-                embedding_id: Some(format!(
-                    "issue-doc://{}/{}#doc#0",
-                    repo.full_name, number
-                )),
+                embedding_id: Some(format!("issue-doc://{}/{}#doc#0", repo.full_name, number)),
                 token_count: approximate_token_count(&text),
                 chunk_order: Some(0),
                 created_at: Some(created_at),
@@ -1572,8 +1575,8 @@ async fn add_pull_requests_to_graph(
 
         let representative_ids_json = serde_json::to_string(&pr.representative_comment_ids)
             .unwrap_or_else(|_| "[]".to_string());
-        let related_issues_json = serde_json::to_string(&pr.related_issues)
-            .unwrap_or_else(|_| "[]".to_string());
+        let related_issues_json =
+            serde_json::to_string(&pr.related_issues).unwrap_or_else(|_| "[]".to_string());
 
         graph.add_entities(vec![PullRequest {
             project_url: Some(project_url.to_string()),
@@ -1627,11 +1630,7 @@ async fn add_pull_requests_to_graph(
                 pr.author_login.as_deref(),
             ) {
                 graph.add_entities(vec![OpenedPr {
-                    id: Some(uuid_from_edge(
-                        OpenedPr::ENTITY_TYPE,
-                        &dev_id,
-                        &pr_node_id,
-                    )),
+                    id: Some(uuid_from_edge(OpenedPr::ENTITY_TYPE, &dev_id, &pr_node_id)),
                     from_node_id: Some(dev_id),
                     to_node_id: Some(pr_node_id.clone()),
                     from_node_type: Some(Developer::ENTITY_TYPE.to_string()),
@@ -1705,10 +1704,7 @@ async fn add_pull_requests_to_graph(
                 .cloned()
                 .filter(|vector| !vector.is_empty());
             let embedding_model_value = embedding.as_ref().and_then(|_| embedding_model.clone());
-            let text = doc_texts
-                .get(idx)
-                .cloned()
-                .unwrap_or_else(|| String::new());
+            let text = doc_texts.get(idx).cloned().unwrap_or_else(|| String::new());
 
             pr_docs.push(PrDoc {
                 id: None,
@@ -1718,10 +1714,7 @@ async fn add_pull_requests_to_graph(
                 text: Some(text.clone()),
                 embedding,
                 embedding_model: embedding_model_value,
-                embedding_id: Some(format!(
-                    "pr-doc://{}/{}#doc#0",
-                    repo.full_name, number
-                )),
+                embedding_id: Some(format!("pr-doc://{}/{}#doc#0", repo.full_name, number)),
                 token_count: approximate_token_count(&text),
                 chunk_order: Some(0),
                 created_at: Some(created_at),
@@ -1807,10 +1800,7 @@ fn lookup_developer(
 
 fn build_issue_doc_text(issue: &IssueInfo, repo: &RepositoryInfo) -> Option<String> {
     let mut sections = Vec::new();
-    sections.push(format!(
-        "Issue #{} in {}",
-        issue.number, repo.full_name
-    ));
+    sections.push(format!("Issue #{} in {}", issue.number, repo.full_name));
     sections.push(format!("State: {}", issue.state));
     if let Some(author) = &issue.author_login {
         sections.push(format!("Author: {}", author));
@@ -1839,10 +1829,7 @@ fn build_issue_doc_text(issue: &IssueInfo, repo: &RepositoryInfo) -> Option<Stri
 
 fn build_pr_doc_text(pr: &PullRequestInfo, repo: &RepositoryInfo) -> Option<String> {
     let mut sections = Vec::new();
-    sections.push(format!(
-        "Pull Request #{} in {}",
-        pr.number, repo.full_name
-    ));
+    sections.push(format!("Pull Request #{} in {}", pr.number, repo.full_name));
     sections.push(format!(
         "State: {}{}",
         pr.state,

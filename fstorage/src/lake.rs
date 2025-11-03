@@ -768,8 +768,14 @@ impl Lake {
             id_col = id_column,
             values = escaped_ids.join(", ")
         );
-        let df = ctx.sql(&sql).await.map_err(|e| StorageError::Other(e.into()))?;
-        let batches = df.collect().await.map_err(|e| StorageError::Other(e.into()))?;
+        let df = ctx
+            .sql(&sql)
+            .await
+            .map_err(|e| StorageError::Other(e.into()))?;
+        let batches = df
+            .collect()
+            .await
+            .map_err(|e| StorageError::Other(e.into()))?;
 
         let mut map = HashMap::new();
         for batch in batches {

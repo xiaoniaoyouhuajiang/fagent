@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use std::collections::HashMap;
 use octocrab::{
     models::{
         repos::{Object, RepoCommit},
@@ -10,12 +9,13 @@ use octocrab::{
     params::{self, Direction},
     Octocrab,
 };
+use std::collections::HashMap;
 
 use crate::{
     error::{GitFetcherError, Result},
     models::{
-        CommentInfo, CommentKind, CommitInfo, DeveloperProfile, IssueInfo, IssueRelation, LabelInfo,
-        PullRequestInfo, ReactionSummary, ReadmeContent, RepoSnapshot, RepositoryInfo,
+        CommentInfo, CommentKind, CommitInfo, DeveloperProfile, IssueInfo, IssueRelation,
+        LabelInfo, PullRequestInfo, ReactionSummary, ReadmeContent, RepoSnapshot, RepositoryInfo,
         ResolvedRevision, SearchRepository,
     },
     params::{RepoSnapshotParams, SearchRepoParams},
@@ -119,10 +119,7 @@ impl OctocrabService {
         repo_info: &RepositoryInfo,
         rev: Option<&str>,
     ) -> Result<ResolvedRevision> {
-        log::info!(
-            "Resolving revision for {owner}/{repo} (hint: {:?})",
-            rev
-        );
+        log::info!("Resolving revision for {owner}/{repo} (hint: {:?})", rev);
         let repo_handle = self.client.repos(owner, repo);
 
         if let Some(reference) = rev {
@@ -201,9 +198,7 @@ impl OctocrabService {
         repo: &str,
         reference: &str,
     ) -> Result<RepoCommit> {
-        log::info!(
-            "Fetching commit object for {owner}/{repo}@{reference} via list_commits"
-        );
+        log::info!("Fetching commit object for {owner}/{repo}@{reference} via list_commits");
         let page = self
             .client
             .repos(owner, repo)
@@ -315,13 +310,12 @@ impl OctocrabService {
                 })
                 .collect::<Vec<_>>();
 
-            let labels = issue
-                .labels
-                .iter()
-                .map(Self::map_label)
-                .collect::<Vec<_>>();
+            let labels = issue.labels.iter().map(Self::map_label).collect::<Vec<_>>();
 
-            let milestone = issue.milestone.as_ref().map(|milestone| milestone.title.clone());
+            let milestone = issue
+                .milestone
+                .as_ref()
+                .map(|milestone| milestone.title.clone());
 
             let comments = self
                 .load_issue_comments(owner, repo, issue.number, developers, comment_limit)
@@ -430,12 +424,7 @@ impl OctocrabService {
 
             let mut relations = Vec::new();
             if let Some(title) = pr.title.as_ref() {
-                relations.extend(Self::extract_issue_links(
-                    title,
-                    owner,
-                    repo,
-                    "pr_title",
-                ));
+                relations.extend(Self::extract_issue_links(title, owner, repo, "pr_title"));
             }
             if let Some(body) = pr.body.as_ref() {
                 relations.extend(Self::extract_issue_links(body, owner, repo, "pr_body"));
@@ -588,9 +577,7 @@ impl OctocrabService {
         developers: &mut HashMap<String, DeveloperProfile>,
         max_entries: usize,
     ) -> Result<Vec<CommentInfo>> {
-        log::info!(
-            "Loading review comments for {owner}/{repo} PR #{number} (limit {max_entries})"
-        );
+        log::info!("Loading review comments for {owner}/{repo} PR #{number} (limit {max_entries})");
         let mut page = self
             .client
             .pulls(owner, repo)
@@ -640,9 +627,7 @@ impl OctocrabService {
                         .unwrap_or(false),
                     kind: CommentKind::Review,
                     in_reply_to_id: comment.in_reply_to_id.map(|id| id.0 as i64),
-                    review_state: comment
-                        .pull_request_review_id
-                        .map(|id| id.0.to_string()),
+                    review_state: comment.pull_request_review_id.map(|id| id.0.to_string()),
                     path: Some(comment.path.clone()),
                     position: comment.position.map(|pos| pos as i64),
                 }
@@ -784,11 +769,8 @@ impl OctocrabService {
     }
 
     fn reaction_score(summary: &ReactionSummary) -> f32 {
-        let positive = summary.plus_one
-            + summary.heart
-            + summary.hooray
-            + summary.eyes
-            + summary.rocket;
+        let positive =
+            summary.plus_one + summary.heart + summary.hooray + summary.eyes + summary.rocket;
         let negative = summary.confused;
 
         let positive_score = if positive == 0 {
@@ -823,7 +805,14 @@ impl OctocrabService {
     fn position_weight(index: usize, _total: usize, comment: &CommentInfo) -> f32 {
         let mut weight: f32 = if index == 0 { 0.6 } else { 0.3 };
         let text = comment.body_text.to_lowercase();
-        let keywords = ["fix", "fixed", "resolve", "resolved", "workaround", "duplicate"];
+        let keywords = [
+            "fix",
+            "fixed",
+            "resolve",
+            "resolved",
+            "workaround",
+            "duplicate",
+        ];
         if keywords.iter().any(|kw| text.contains(kw)) {
             weight += 0.3;
         }
@@ -910,9 +899,8 @@ impl OctocrabService {
         }
 
         for relation in &mut results {
-            relation.cross_repo =
-                !(relation.owner.eq_ignore_ascii_case(default_owner)
-                    && relation.repo.eq_ignore_ascii_case(default_repo));
+            relation.cross_repo = !(relation.owner.eq_ignore_ascii_case(default_owner)
+                && relation.repo.eq_ignore_ascii_case(default_repo));
         }
 
         results
@@ -944,7 +932,10 @@ impl OctocrabService {
             if !owner.is_empty() && !repo.is_empty() {
                 return (owner.to_string(), repo.to_string());
             }
-        } else if prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        } else if prefix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
             return (default_owner.to_string(), prefix.to_string());
         }
 
@@ -991,19 +982,21 @@ impl OctocrabService {
         author: &octocrab::models::Author,
     ) {
         let account_id = author.id.0.to_string();
-        developers.entry(account_id.clone()).or_insert_with(|| DeveloperProfile {
-            platform: "github".to_string(),
-            account_id,
-            login: author.login.clone(),
-            name: None,
-            company: None,
-            followers: None,
-            following: None,
-            location: None,
-            email: None,
-            created_at: None,
-            updated_at: None,
-        });
+        developers
+            .entry(account_id.clone())
+            .or_insert_with(|| DeveloperProfile {
+                platform: "github".to_string(),
+                account_id,
+                login: author.login.clone(),
+                name: None,
+                company: None,
+                followers: None,
+                following: None,
+                location: None,
+                email: None,
+                created_at: None,
+                updated_at: None,
+            });
     }
 
     fn map_label(label: &octocrab::models::Label) -> LabelInfo {
@@ -1020,7 +1013,6 @@ impl OctocrabService {
             other => format!("{other:?}"),
         }
     }
-
 }
 
 #[async_trait]

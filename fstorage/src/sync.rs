@@ -6,7 +6,9 @@ use crate::fetch::{
 };
 use crate::lake::Lake;
 use crate::models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext};
-use crate::schema_registry::{vector_index, vector_rules, SourceNodeId, SourceNodeType, SCHEMA_REGISTRY};
+use crate::schema_registry::{
+    SCHEMA_REGISTRY, SourceNodeId, SourceNodeType, vector_index, vector_rules,
+};
 use crate::utils;
 use async_trait::async_trait;
 use bincode;
@@ -19,9 +21,10 @@ use deltalake::arrow::record_batch::RecordBatch;
 use heed3::{RoTxn, RwTxn};
 use helix_db::{
     helix_engine::{
-        bm25::bm25::{BM25Flatten, BM25},
+        bm25::bm25::{BM25, BM25Flatten},
         storage_core::storage_methods::StorageMethods,
         traversal_core::{
+            HelixGraphEngine,
             ops::{
                 g::G,
                 source::{e_from_id::EFromIdAdapter, n_from_id::NFromIdAdapter},
@@ -29,7 +32,6 @@ use helix_db::{
                 vectors::insert::InsertVAdapter,
             },
             traversal_value::Traversable,
-            HelixGraphEngine,
         },
         vector_core::vector::HVector,
     },
@@ -154,9 +156,12 @@ impl FStorageSynchronizer {
             } => {
                 let mut key_pairs: Vec<(&'static str, String)> = Vec::new();
                 for mapping in mappings {
-                    let Some(value) =
-                        Self::string_from_columns(columns, column_index, mapping.vector_column, row)
-                    else {
+                    let Some(value) = Self::string_from_columns(
+                        columns,
+                        column_index,
+                        mapping.vector_column,
+                        row,
+                    ) else {
                         log::warn!(
                             "Vector edge '{}' skipped: column '{}' missing on row {}",
                             rule.edge_type,
@@ -170,11 +175,9 @@ impl FStorageSynchronizer {
                 if key_pairs.is_empty() {
                     return Ok(None);
                 }
-                let node_id = Uuid::from_u128(utils::id::stable_node_id_u128(
-                    src_entity,
-                    &key_pairs,
-                ))
-                .to_string();
+                let node_id =
+                    Uuid::from_u128(utils::id::stable_node_id_u128(src_entity, &key_pairs))
+                        .to_string();
                 let from_type = match &rule.source_node_type {
                     SourceNodeType::Literal(value) => value.to_string(),
                     SourceNodeType::FromKeyPattern(column) => {
@@ -203,8 +206,7 @@ impl FStorageSynchronizer {
                 (node_id, from_type)
             }
             SourceNodeId::DirectColumn { column } => {
-                let Some(node_id) =
-                    Self::string_from_columns(columns, column_index, column, row)
+                let Some(node_id) = Self::string_from_columns(columns, column_index, column, row)
                 else {
                     log::warn!(
                         "Vector edge '{}' skipped: source id column '{}' missing on row {}",
@@ -243,7 +245,8 @@ impl FStorageSynchronizer {
             }
         };
 
-        let edge_id = utils::id::stable_edge_id_u128(rule.edge_type, &from_node_id, vector_identity);
+        let edge_id =
+            utils::id::stable_edge_id_u128(rule.edge_type, &from_node_id, vector_identity);
         Ok(Some(EdgeWrite {
             id: Some(Uuid::from_u128(edge_id).to_string()),
             from_node_id: Some(from_node_id),
@@ -261,8 +264,10 @@ impl FStorageSynchronizer {
             edges.iter().map(|edge| edge.from_node_id.clone()).collect();
         let to_ids: Vec<Option<String>> =
             edges.iter().map(|edge| edge.to_node_id.clone()).collect();
-        let from_types: Vec<Option<String>> =
-            edges.iter().map(|edge| edge.from_node_type.clone()).collect();
+        let from_types: Vec<Option<String>> = edges
+            .iter()
+            .map(|edge| edge.from_node_type.clone())
+            .collect();
         let to_types: Vec<Option<String>> =
             edges.iter().map(|edge| edge.to_node_type.clone()).collect();
         let created_at: Vec<Option<DateTime<Utc>>> =
@@ -867,14 +872,12 @@ impl FStorageSynchronizer {
         }
 
         // Ensure the entity is known within the registry for consistent metadata.
-        let _vector_meta = SCHEMA_REGISTRY
-            .entity(entity_type)
-            .ok_or_else(|| {
-                StorageError::InvalidArg(format!(
-                    "Vector entity type '{}' is not registered in schema metadata",
-                    entity_type
-                ))
-            })?;
+        let _vector_meta = SCHEMA_REGISTRY.entity(entity_type).ok_or_else(|| {
+            StorageError::InvalidArg(format!(
+                "Vector entity type '{}' is not registered in schema metadata",
+                entity_type
+            ))
+        })?;
 
         let rules = vector_rules(entity_type);
         let vector_index_meta = vector_index(entity_type).cloned();
@@ -1055,9 +1058,7 @@ impl FStorageSynchronizer {
                     )
                     .collect_to_obj();
                 let new_uuid = traversal.uuid();
-                let record_identity = existing_id
-                    .clone()
-                    .unwrap_or_else(|| new_uuid.clone());
+                let record_identity = existing_id.clone().unwrap_or_else(|| new_uuid.clone());
                 vector_ids.push(Some(record_identity.clone()));
 
                 if let (Some(_), Some(id)) = (vector_index_meta.as_ref(), id_value.as_ref()) {

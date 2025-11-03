@@ -4,10 +4,10 @@ use once_cell::sync::Lazy;
 
 use crate::fetch::EntityCategory;
 use crate::schemas::generated_schemas::{
-    EdgeMetaRecord, EntityMetaRecord, StableIdStrategy, VectorEdgeRuleRecord,
-    VectorIndexRecord, VectorKeyMappingRecord, VectorSourceRecord, VectorSourceTypeRecord,
-    GENERATED_EDGE_METADATA, GENERATED_ENTITY_METADATA, GENERATED_VECTOR_EDGE_RULES,
-    GENERATED_VECTOR_INDEX_RULES,
+    EdgeMetaRecord, EntityMetaRecord, GENERATED_EDGE_METADATA, GENERATED_ENTITY_METADATA,
+    GENERATED_VECTOR_EDGE_RULES, GENERATED_VECTOR_INDEX_RULES, StableIdStrategy,
+    VectorEdgeRuleRecord, VectorIndexRecord, VectorKeyMappingRecord, VectorSourceRecord,
+    VectorSourceTypeRecord,
 };
 
 #[derive(Debug, Clone)]
@@ -154,15 +154,14 @@ pub fn vector_rules(entity_type: &str) -> Option<&VectorRules> {
     VECTOR_EDGE_RULES.get(entity_type)
 }
 
-pub static VECTOR_INDEX_RULES: Lazy<HashMap<&'static str, VectorIndexMetadata>> =
-    Lazy::new(|| {
-        let mut map = HashMap::new();
-        for record in GENERATED_VECTOR_INDEX_RULES.iter() {
-            let meta = convert_vector_index(record);
-            map.insert(meta.vector_entity, meta);
-        }
-        map
-    });
+pub static VECTOR_INDEX_RULES: Lazy<HashMap<&'static str, VectorIndexMetadata>> = Lazy::new(|| {
+    let mut map = HashMap::new();
+    for record in GENERATED_VECTOR_INDEX_RULES.iter() {
+        let meta = convert_vector_index(record);
+        map.insert(meta.vector_entity, meta);
+    }
+    map
+});
 
 pub fn vector_index(entity_type: &str) -> Option<&VectorIndexMetadata> {
     VECTOR_INDEX_RULES.get(entity_type)
@@ -196,9 +195,7 @@ fn convert_vector_rule(record: &VectorEdgeRuleRecord) -> VectorEdgeRule {
 
     let source_node_type = match &record.source_node_type {
         VectorSourceTypeRecord::Literal(value) => SourceNodeType::Literal(value),
-        VectorSourceTypeRecord::FromKeyPattern(column) => {
-            SourceNodeType::FromKeyPattern(column)
-        }
+        VectorSourceTypeRecord::FromKeyPattern(column) => SourceNodeType::FromKeyPattern(column),
     };
 
     VectorEdgeRule {
