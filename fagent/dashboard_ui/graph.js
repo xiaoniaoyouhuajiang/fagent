@@ -226,6 +226,7 @@ function updateLegend(usedTypes = null) {
     } else {
         graphLegend.classList.add("hidden");
     }
+}
 
 function renderPathSummary(result) {
     if (!result || !Array.isArray(result.nodes)) {
@@ -382,36 +383,45 @@ function renderGraph(data) {
         label: edge.label,
     }));
 
-        const container = $("#graph-container");
-        if (!container) return;
-
-        if (!network) {
-            network = new vis.Network(container, { nodes, edges }, {
-            nodes: {
-                shape: "dot",
-                scaling: { min: 8, max: 24 },
-                font: { color: "#e2e8f0" },
-            },
-            edges: {
-                arrows: "to",
-                color: { color: "#64748b" },
-                font: { color: "#94a3b8", strokeWidth: 0 },
-                smooth: true,
-            },
-            physics: {
-                stabilization: true,
-                barnesHut: {
-                    gravitationalConstant: -2000,
-                    springLength: 140,
-                },
-            },
-            groups: createGroupOptions(),
-        });
-        } else {
-            network.setOptions({ groups: createGroupOptions() });
-            network.setData({ nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) });
-        }
+    const container = $("#graph-container");
+    if (!container) {
+        return;
     }
+
+    if (!network) {
+        network = new vis.Network(
+            container,
+            { nodes, edges },
+            {
+                nodes: {
+                    shape: "dot",
+                    scaling: { min: 8, max: 24 },
+                    font: { color: "#e2e8f0" },
+                },
+                edges: {
+                    arrows: "to",
+                    color: { color: "#64748b" },
+                    font: { color: "#94a3b8", strokeWidth: 0 },
+                    smooth: true,
+                },
+                physics: {
+                    stabilization: true,
+                    barnesHut: {
+                        gravitationalConstant: -2000,
+                        springLength: 140,
+                    },
+                },
+                groups: createGroupOptions(),
+            },
+        );
+    } else {
+        network.setOptions({ groups: createGroupOptions() });
+        network.setData({
+            nodes: new vis.DataSet(nodes),
+            edges: new vis.DataSet(edges),
+        });
+    }
+}
 
 async function fetchJSON(url, options) {
     const response = await fetch(url, options);
