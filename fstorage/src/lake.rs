@@ -1,7 +1,7 @@
 use crate::config::StorageConfig;
 use crate::errors::{Result, StorageError};
 use crate::models::{
-    ColumnSummary, HybridSearchHit, MultiEntitySearchHit, TableSummary, TextSearchHit,
+    ColumnSummary, HybridSearchHit, MultiEntitySearchHit, PathResult, TableSummary, TextSearchHit,
     VectorSearchHit,
 };
 use crate::utils;
@@ -27,7 +27,11 @@ use heed3::RoTxn;
 use helix_db::helix_engine::bm25::bm25::BM25;
 use helix_db::helix_engine::storage_core::storage_methods::StorageMethods;
 use helix_db::helix_engine::storage_core::HelixGraphStorage;
-use helix_db::helix_engine::traversal_core::HelixGraphEngine;
+use helix_db::helix_engine::traversal_core::{
+    ops::{g::G, source::n_from_id::NFromIdAdapter, util::paths::ShortestPathAdapter},
+    traversal_value::TraversalValue,
+    HelixGraphEngine,
+};
 use helix_db::helix_engine::types::{GraphError, VectorError};
 use helix_db::helix_engine::vector_core::hnsw::HNSW;
 use helix_db::helix_engine::vector_core::vector::HVector;
@@ -1113,6 +1117,58 @@ impl Lake {
         }
 
         Ok(Subgraph { nodes, edges })
+    }
+
+    pub async fn shortest_path(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        edge_label: Option<&str>,
+    ) -> Result<Option<PathResult>> {
+        let from_uuid = Uuid::parse_str(from_id)
+            .map_err(|_| StorageError::InvalidArg(format!("Invalid node id '{}'", from_id)))?;
+        let to_uuid = Uuid::parse_str(to_id)
+            .map_err(|_| StorageError::InvalidArg(format!("Invalid node id '{}'", to_id)))?;
+
+        let from_key = from_uuid.as_u128();
+        let to_key = to_uuid.as_u128();
+
+        let txn = self.engine.storage.graph_env.read_txn()?;
+
+        if self.engine.storage.get_node(&txn, &from_key).is_err() {
+            return Ok(None);
+        }
+
+        if self.engine.storage.get_node(&txn, &to_key).is_err() {
+            return Ok(None);
+        }
+
+        let mut iterator = G::new(self.engine.storage.clone(), &txn)
+            .n_from_id(&to_key)
+            .shortest_path(edge_label, Some(&from_key), None);
+
+        while let Some(item) = iterator.next() {
+            match item {
+                Ok(TraversalValue::Path((path_nodes, path_edges))) => {
+                    let nodes: Vec<HashMap<String, JsonValue>> =
+                        path_nodes.into_iter().map(Self::node_to_map).collect();
+                    let edges: Vec<HashMap<String, JsonValue>> =
+                        path_edges.into_iter().map(Self::edge_to_map).collect();
+                    return Ok(Some(PathResult {
+                        length: edges.len(),
+                        nodes,
+                        edges,
+                    }));
+                }
+                Ok(_) => continue,
+                Err(GraphError::ShortestPathNotFound) | Err(GraphError::NodeNotFound) => {
+                    return Ok(None)
+                }
+                Err(err) => return Err(StorageError::Graph(err.into())),
+            }
+        }
+
+        Ok(None)
     }
 
     fn load_node_map_for_id(

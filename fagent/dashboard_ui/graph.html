@@ -64,6 +64,43 @@
             </div>
         </section>
 
+        <section id="graph-path-section">
+            <div class="section-header">
+                <h2>最短路径搜索</h2>
+            </div>
+            <div class="path-controls">
+                <label class="stack">
+                    起点节点
+                    <input
+                        id="graph-path-from"
+                        type="text"
+                        placeholder="输入起点 UUID"
+                        autocomplete="off"
+                    />
+                </label>
+                <label class="stack">
+                    终点节点
+                    <input
+                        id="graph-path-to"
+                        type="text"
+                        placeholder="输入终点 UUID"
+                        autocomplete="off"
+                    />
+                </label>
+                <label class="stack">
+                    边类型（可选）
+                    <input
+                        id="graph-path-edge"
+                        type="text"
+                        placeholder="edge_containscontent"
+                        autocomplete="off"
+                    />
+                </label>
+                <button id="graph-path-run" class="primary">查找路径</button>
+            </div>
+            <div id="graph-path-result" class="path-result muted"></div>
+        </section>
+
         <section id="graph-visual-section">
             <div id="graph-container"></div>
             <div id="graph-legend" class="graph-legend hidden"></div>

@@ -20,8 +20,8 @@ use crate::errors::Result;
 use crate::fetch::{Fetcher, FetcherCapability};
 use crate::lake::Lake;
 use crate::models::{
-    EntityIdentifier, EntityMetadata, HybridSearchHit, MultiEntitySearchHit, ReadinessReport,
-    TableSummary, TextSearchHit, VectorSearchHit,
+    EntityIdentifier, EntityMetadata, HybridSearchHit, MultiEntitySearchHit, PathResult,
+    ReadinessReport, TableSummary, TextSearchHit, VectorSearchHit,
 };
 use crate::sync::{DataSynchronizer, FStorageSynchronizer};
 use helix_db::helix_engine::traversal_core::{HelixGraphEngine, HelixGraphEngineOpts};
@@ -237,6 +237,15 @@ impl FStorage {
 
     pub fn embedding_provider(&self) -> Arc<dyn EmbeddingProvider> {
         Arc::clone(&self.embedding_provider)
+    }
+
+    pub async fn shortest_path(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        edge_label: Option<&str>,
+    ) -> Result<Option<PathResult>> {
+        self.lake.shortest_path(from_id, to_id, edge_label).await
     }
 }
 

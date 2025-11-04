@@ -11,6 +11,11 @@ const graphEdgeLimitInput = $("#graph-edge-limit");
 const graphEdgeTypesInput = $("#graph-edge-types");
 const loadButton = $("#graph-load");
 const typeFilterSelect = $("#graph-type-filter");
+const pathFromInput = $("#graph-path-from");
+const pathToInput = $("#graph-path-to");
+const pathEdgeInput = $("#graph-path-edge");
+const pathRunButton = $("#graph-path-run");
+const pathResultBox = $("#graph-path-result");
 
 let network = null;
 let graphCandidates = [];
@@ -220,6 +225,54 @@ function updateLegend(usedTypes = null) {
         graphLegend.classList.remove("hidden");
     } else {
         graphLegend.classList.add("hidden");
+    }
+
+function renderPathSummary(result) {
+    if (!result || !Array.isArray(result.nodes)) {
+        return "";
+    }
+    const headline = `<p>路径长度：${Number.isFinite(result.length) ? result.length : 0}</p>`;
+    const nodeItems = result.nodes
+        .map((node, index) => {
+            const label =
+                (node.display_name && node.display_name.trim()) ||
+                (node.properties?.name && String(node.properties.name)) ||
+                node.id;
+            const entity = node.entity_type || "节点";
+            return `<li>${index + 1}. ${label} <small>(${entity})</small></li>`;
+        })
+        .join("");
+    return `<div class="path-summary">${headline}<ol>${nodeItems}</ol></div>`;
+}
+
+async function runShortestPath() {
+    if (!pathFromInput || !pathToInput || !pathResultBox) {
+        return;
+    }
+    const fromId = pathFromInput.value.trim();
+    const toId = pathToInput.value.trim();
+    const edgeLabel = pathEdgeInput?.value.trim() || "";
+    if (!fromId || !toId) {
+        pathResultBox.textContent = "请填写起点与终点节点的 UUID。";
+        return;
+    }
+    pathResultBox.textContent = "正在计算最短路径…";
+    try {
+        const params = new URLSearchParams();
+        params.set("from_id", fromId);
+        params.set("to_id", toId);
+        if (edgeLabel) {
+            params.set("edge_label", edgeLabel);
+        }
+        const result = await fetchJSON(`/api/graph/shortest_path?${params.toString()}`);
+        if (!result || !result.found) {
+            pathResultBox.textContent = "未找到满足条件的路径。";
+            return;
+        }
+        pathResultBox.innerHTML = renderPathSummary(result);
+        renderGraph({ nodes: result.nodes || [], edges: result.edges || [] });
+    } catch (error) {
+        pathResultBox.textContent = `路径搜索失败: ${error.message}`;
     }
 }
 
@@ -461,6 +514,9 @@ const debouncedSearch = debounce((term) => {
 
 async function loadSubgraph({ startId, showError = true } = {}) {
     graphError.textContent = "";
+    if (pathResultBox) {
+        pathResultBox.textContent = "";
+    }
     const nodeId = startId || selectedNodeId || (searchInput?.value || "").trim();
     if (!nodeId) {
         if (showError) {
@@ -521,6 +577,19 @@ function attachEventHandlers() {
     if (loadButton) {
         loadButton.addEventListener("click", () => loadSubgraph({ showError: true }));
     }
+
+    if (pathRunButton) {
+        pathRunButton.addEventListener("click", () => runShortestPath());
+    }
+
+    [pathFromInput, pathToInput, pathEdgeInput].forEach((input) => {
+        input?.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                runShortestPath();
+            }
+        });
+    });
 
     if (typeFilterSelect) {
         typeFilterSelect.addEventListener("change", () => {

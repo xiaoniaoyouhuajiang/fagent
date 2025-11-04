@@ -181,6 +181,14 @@ struct GraphSubgraphQuery {
 }
 
 #[derive(Clone, Deserialize)]
+struct GraphShortestPathQuery {
+    from_id: String,
+    to_id: String,
+    #[serde(default)]
+    edge_label: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
 struct GraphNodeDetailQuery {
     id: String,
 }
@@ -285,6 +293,14 @@ struct GraphEdgeDto {
 #[derive(Serialize)]
 struct GraphSubgraphResponse {
     center: GraphNodeDto,
+    nodes: Vec<GraphNodeDto>,
+    edges: Vec<GraphEdgeDto>,
+}
+
+#[derive(Serialize)]
+struct GraphPathResponse {
+    found: bool,
+    length: usize,
     nodes: Vec<GraphNodeDto>,
     edges: Vec<GraphEdgeDto>,
 }
@@ -603,6 +619,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/graph/types", get(graph_types))
         .route("/api/graph/search", get(graph_search))
         .route("/api/graph/subgraph", get(graph_subgraph))
+        .route("/api/graph/shortest_path", get(graph_shortest_path))
         .route("/api/graph/node", get(graph_node_detail))
         .route("/api/graph/visual", get(graph_visual))
         .route("/api/search/hybrid/types", get(hybrid_entity_types))
@@ -1030,6 +1047,49 @@ async fn graph_subgraph(
         center: center_node,
         nodes: nodes.into_values().collect(),
         edges,
+    }))
+}
+
+async fn graph_shortest_path(
+    State(state): State<AppState>,
+    Query(query): Query<GraphShortestPathQuery>,
+) -> ApiResult<Json<GraphPathResponse>> {
+    let edge_label = query.edge_label.as_deref();
+    let path = state
+        .storage
+        .lake
+        .shortest_path(&query.from_id, &query.to_id, edge_label)
+        .await
+        .map_err(ApiError::from_storage)?;
+
+    if let Some(result) = path {
+        let mut nodes = Vec::new();
+        for node_map in result.nodes {
+            if let Some(node) = map_node_record(node_map) {
+                nodes.push(node);
+            }
+        }
+
+        let mut edges = Vec::new();
+        for edge_map in result.edges {
+            if let Some(edge) = map_edge_record(edge_map) {
+                edges.push(edge);
+            }
+        }
+
+        return Ok(Json(GraphPathResponse {
+            found: true,
+            length: result.length,
+            nodes,
+            edges,
+        }));
+    }
+
+    Ok(Json(GraphPathResponse {
+        found: false,
+        length: 0,
+        nodes: Vec::new(),
+        edges: Vec::new(),
     }))
 }
 

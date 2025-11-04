@@ -81,6 +81,13 @@ pub struct MultiEntitySearchHit {
     pub vector: Option<HashMap<String, JsonValue>>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PathResult {
+    pub length: usize,
+    pub nodes: Vec<HashMap<String, JsonValue>>,
+    pub edges: Vec<HashMap<String, JsonValue>>,
+}
+
 #[derive(Debug, Clone)]
 pub enum SyncBudget {
     ByDuration(std::time::Duration),

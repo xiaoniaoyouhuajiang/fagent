@@ -143,6 +143,51 @@ section {
     gap: 0.75rem;
 }
 
+.path-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    align-items: flex-end;
+}
+
+.path-controls label {
+    flex: 1 1 220px;
+}
+
+#graph-path-run {
+    align-self: flex-end;
+    padding: 0.55rem 1rem;
+    height: 2.4rem;
+}
+
+.path-result {
+    min-height: 2rem;
+    font-size: 0.9rem;
+    line-height: 1.4;
+}
+
+.path-result .path-summary {
+    background: var(--surface-light);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.path-result .path-summary ol {
+    margin: 0;
+    padding-left: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.path-result .path-summary li {
+    word-break: break-all;
+}
+
 .graph-params {
     display: flex;
     gap: 0.6rem;
