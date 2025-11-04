@@ -1,13 +1,15 @@
+use chrono::Utc;
 use fstorage::{
-    FStorage,
     fetch::{Fetchable, GraphData},
-    schemas::generated_schemas::{Function, ReadmeChunk},
+    schemas::generated_schemas::{Function, Project, ReadmeChunk},
     sync::DataSynchronizer,
+    FStorage,
 };
 use heed3::RoTxn;
 use helix_db::helix_engine::traversal_core::ops::{g::G, vectors::insert::InsertVAdapter};
 use helix_db::helix_engine::vector_core::hnsw::HNSW;
 use helix_db::helix_engine::vector_core::vector::HVector;
+use std::collections::HashSet;
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -198,5 +200,91 @@ async fn index_search_matches_uuid_prefixes() -> anyhow::Result<()> {
         "prefix search should return the record with matching id"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn hybrid_multi_search_aggregates_across_entities() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let config = fstorage::config::StorageConfig::new(dir.path());
+    let storage = FStorage::new(config).await?;
+
+    let mut graph = GraphData::new();
+    graph.add_entities(vec![Function {
+        version_sha: Some("sha-multi".to_string()),
+        file_path: Some("src/search.rs".to_string()),
+        name: Some("function::hybrid_example".to_string()),
+        signature: Some("fn hybrid_example_search()".to_string()),
+        start_line: Some(1),
+        end_line: Some(10),
+        is_component: Some(false),
+    }]);
+    storage.synchronizer.process_graph_data(graph).await?;
+
+    let passage = "passage: hybrid search example for readme chunk";
+    let embedding = storage
+        .embed_texts(vec![passage.to_string()])
+        .await?
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    let embedding_f32: Vec<f32> = embedding.iter().map(|v| *v as f32).collect();
+
+    let mut vector_graph = GraphData::new();
+    vector_graph.add_entities(vec![Project {
+        url: Some("https://example.com/repo".to_string()),
+        name: Some("example".to_string()),
+        description: Some("Hybrid search example".to_string()),
+        language: Some("Rust".to_string()),
+        stars: Some(1),
+        forks: Some(0),
+    }]);
+    vector_graph.add_entities(vec![ReadmeChunk {
+        id: None,
+        project_url: Some("https://example.com/repo".to_string()),
+        revision_sha: Some("rev-multi".to_string()),
+        source_file: Some("README.md".to_string()),
+        start_line: Some(1),
+        end_line: Some(5),
+        text: Some(passage.to_string()),
+        embedding: Some(embedding_f32.clone()),
+        embedding_model: Some("fixture-model".to_string()),
+        embedding_id: Some("chunk-hybrid-1".to_string()),
+        token_count: Some(6),
+        chunk_order: Some(0),
+        created_at: Some(Utc::now()),
+        updated_at: None,
+    }]);
+    storage
+        .synchronizer
+        .process_graph_data(vector_graph)
+        .await?;
+
+    let entity_types = vec![
+        Function::ENTITY_TYPE.to_string(),
+        ReadmeChunk::ENTITY_TYPE.to_string(),
+    ];
+    let hits = storage
+        .search_hybrid_multi(&entity_types, "hybrid search example", 0.5, 10)
+        .await?;
+
+    assert!(
+        !hits.is_empty(),
+        "multi-entity hybrid search should return results"
+    );
+    let mut seen_types: HashSet<String> = HashSet::new();
+    for hit in &hits {
+        seen_types.insert(hit.entity_type.clone());
+        assert!(hit.score >= 0.0, "scores should be non-negative");
+    }
+
+    assert!(
+        seen_types.contains(Function::ENTITY_TYPE),
+        "expected function entity hits"
+    );
+    assert!(
+        seen_types.contains(ReadmeChunk::ENTITY_TYPE),
+        "expected readme chunk hits"
+    );
     Ok(())
 }

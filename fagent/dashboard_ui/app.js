@@ -11,6 +11,11 @@ const syncBudgetValue = $("#sync-budget-value");
 const syncParamsInput = $("#sync-params");
 const syncTargetsInput = $("#sync-targets");
 const syncOutput = $("#sync-output");
+const hybridQueryInput = $("#hybrid-query");
+const hybridEntitiesInput = $("#hybrid-entities");
+const hybridAlphaInput = $("#hybrid-alpha");
+const hybridLimitInput = $("#hybrid-limit");
+const hybridOutput = $("#hybrid-output");
 
 function isPlainObject(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -246,6 +251,58 @@ async function runSync() {
     }
 }
 
+async function loadHybridDefaults() {
+    if (!hybridEntitiesInput) {
+        return;
+    }
+    try {
+        const types = await fetchJSON("/api/search/hybrid/types");
+        if (types.length && !hybridEntitiesInput.value) {
+            hybridEntitiesInput.value = types.join(", ");
+        }
+    } catch (error) {
+        console.warn("加载混合检索实体列表失败:", error);
+    }
+}
+
+async function runHybridSearch() {
+    if (!hybridOutput) {
+        return;
+    }
+    const query = (hybridQueryInput?.value || "").trim();
+    const entityText = (hybridEntitiesInput?.value || "").trim();
+    if (!query) {
+        hybridOutput.textContent = "请输入查询文本。";
+        return;
+    }
+
+    const alpha =
+        Number(hybridAlphaInput?.value ?? 0.5) >= 0
+            ? Number(hybridAlphaInput?.value ?? 0.5)
+            : 0.5;
+    const limit =
+        Math.max(
+            1,
+            Math.min(200, Number(hybridLimitInput?.value ?? 20) || 20),
+        ) || 20;
+
+    const params = new URLSearchParams();
+    params.set("q", query);
+    params.set("alpha", alpha.toString());
+    params.set("limit", limit.toString());
+    if (entityText) {
+        params.set("entity_types", entityText);
+    }
+
+    hybridOutput.textContent = "查询中…";
+    try {
+        const response = await fetchJSON(`/api/search/hybrid_all?${params.toString()}`);
+        hybridOutput.textContent = JSON.stringify(response, null, 2);
+    } catch (error) {
+        hybridOutput.textContent = `查询失败: ${error.message}`;
+    }
+}
+
 function attachEventHandlers() {
     $("#refresh-all").addEventListener("click", () => {
         loadStatus();
@@ -257,13 +314,17 @@ function attachEventHandlers() {
     $("#refresh-tables").addEventListener("click", loadTables);
     $("#run-readiness").addEventListener("click", runReadiness);
     $("#run-sync").addEventListener("click", runSync);
+    $("#run-hybrid-search")?.addEventListener("click", runHybridSearch);
 }
 
 async function bootstrap() {
     attachEventHandlers();
-    await Promise.all([loadStatus(), loadFetchers(), loadTables()]);
+    await Promise.all([loadStatus(), loadFetchers(), loadTables(), loadHybridDefaults()]);
     if (syncOutput) {
         syncOutput.textContent = "等待执行...";
+    }
+    if (hybridOutput) {
+        hybridOutput.textContent = "等待查询…";
     }
 }
 

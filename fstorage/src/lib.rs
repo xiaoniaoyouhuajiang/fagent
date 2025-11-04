@@ -20,8 +20,8 @@ use crate::errors::Result;
 use crate::fetch::{Fetcher, FetcherCapability};
 use crate::lake::Lake;
 use crate::models::{
-    EntityIdentifier, EntityMetadata, HybridSearchHit, ReadinessReport, TableSummary,
-    TextSearchHit, VectorSearchHit,
+    EntityIdentifier, EntityMetadata, HybridSearchHit, MultiEntitySearchHit, ReadinessReport,
+    TableSummary, TextSearchHit, VectorSearchHit,
 };
 use crate::sync::{DataSynchronizer, FStorageSynchronizer};
 use helix_db::helix_engine::traversal_core::{HelixGraphEngine, HelixGraphEngineOpts};
@@ -207,6 +207,27 @@ impl FStorage {
         let vector = embedding.into_iter().next().unwrap_or_default();
         self.lake
             .search_hybrid(entity_type, trimmed, &vector, alpha, limit)
+            .await
+    }
+
+    pub async fn search_hybrid_multi(
+        &self,
+        entity_types: &[String],
+        query_text: &str,
+        alpha: f32,
+        limit: usize,
+    ) -> Result<Vec<MultiEntitySearchHit>> {
+        let trimmed = query_text.trim();
+        if entity_types.is_empty() || trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let embedding = self
+            .embedding_provider
+            .embed(vec![trimmed.to_string()])
+            .await?;
+        let vector = embedding.into_iter().next().unwrap_or_default();
+        self.lake
+            .search_hybrid_multi(entity_types, trimmed, &vector, alpha, limit)
             .await
     }
 

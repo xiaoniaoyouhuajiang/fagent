@@ -7,7 +7,7 @@ use crate::fetch::{
 use crate::lake::Lake;
 use crate::models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext};
 use crate::schema_registry::{
-    SCHEMA_REGISTRY, SourceNodeId, SourceNodeType, vector_index, vector_rules,
+    vector_index, vector_rules, SourceNodeId, SourceNodeType, SCHEMA_REGISTRY,
 };
 use crate::utils;
 use async_trait::async_trait;
@@ -21,10 +21,9 @@ use deltalake::arrow::record_batch::RecordBatch;
 use heed3::{RoTxn, RwTxn};
 use helix_db::{
     helix_engine::{
-        bm25::bm25::{BM25, BM25Flatten},
+        bm25::bm25::{BM25Flatten, BM25},
         storage_core::storage_methods::StorageMethods,
         traversal_core::{
-            HelixGraphEngine,
             ops::{
                 g::G,
                 source::{e_from_id::EFromIdAdapter, n_from_id::NFromIdAdapter},
@@ -32,6 +31,7 @@ use helix_db::{
                 vectors::insert::InsertVAdapter,
             },
             traversal_value::Traversable,
+            HelixGraphEngine,
         },
         vector_core::vector::HVector,
     },

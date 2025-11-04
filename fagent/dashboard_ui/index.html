@@ -32,6 +32,37 @@
             <div id="fetcher-list"></div>
         </section>
 
+        <section id="hybrid-search-section">
+            <div class="section-header">
+                <h2>跨实体混合检索</h2>
+                <button id="run-hybrid-search">查询</button>
+            </div>
+            <p class="hint">
+                统一检索多个实体（Issue / PR / README / CodeChunk 等），支持 BM25 + 向量混合。
+            </p>
+            <div class="hybrid-form">
+                <label>
+                    查询文本
+                    <input id="hybrid-query" type="text" placeholder="例如：hybrid search example" />
+                </label>
+                <label>
+                    实体类型（逗号分隔，可选）
+                    <input id="hybrid-entities" type="text" placeholder="例如：Issue,PullRequest,ReadmeChunk" />
+                </label>
+                <div class="hybrid-inline">
+                    <label>
+                        Alpha
+                        <input id="hybrid-alpha" type="number" min="0" max="1" step="0.1" value="0.5" />
+                    </label>
+                    <label>
+                        条数
+                        <input id="hybrid-limit" type="number" min="1" max="200" value="20" />
+                    </label>
+                </div>
+            </div>
+            <pre id="hybrid-output" class="json-output">等待查询…</pre>
+        </section>
+
         <section id="sync-section">
             <div class="section-header">
                 <h2>触发同步</h2>

@@ -4,10 +4,9 @@ use once_cell::sync::Lazy;
 
 use crate::fetch::EntityCategory;
 use crate::schemas::generated_schemas::{
-    EdgeMetaRecord, EntityMetaRecord, GENERATED_EDGE_METADATA, GENERATED_ENTITY_METADATA,
-    GENERATED_VECTOR_EDGE_RULES, GENERATED_VECTOR_INDEX_RULES, StableIdStrategy,
-    VectorEdgeRuleRecord, VectorIndexRecord, VectorKeyMappingRecord, VectorSourceRecord,
-    VectorSourceTypeRecord,
+    EdgeMetaRecord, EntityMetaRecord, StableIdStrategy, VectorEdgeRuleRecord, VectorIndexRecord,
+    VectorKeyMappingRecord, VectorSourceRecord, VectorSourceTypeRecord, GENERATED_EDGE_METADATA,
+    GENERATED_ENTITY_METADATA, GENERATED_VECTOR_EDGE_RULES, GENERATED_VECTOR_INDEX_RULES,
 };
 
 #[derive(Debug, Clone)]

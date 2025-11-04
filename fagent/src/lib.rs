@@ -20,7 +20,10 @@ use fstorage::{
     config::StorageConfig,
     errors::StorageError,
     fetch::{EntityCategory, FetcherCapability},
-    models::{EntityIdentifier, ReadinessReport, SyncBudget, SyncContext, TableSummary},
+    models::{
+        EntityIdentifier, MultiEntitySearchHit, ReadinessReport, SyncBudget, SyncContext,
+        TableSummary,
+    },
     FStorage,
 };
 use helix_db::helix_engine::storage_core::graph_visualization::GraphVisualization;
@@ -182,6 +185,18 @@ struct GraphNodeDetailQuery {
     id: String,
 }
 
+#[derive(Clone, Deserialize)]
+struct HybridMultiQuery {
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    entity_types: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    alpha: Option<f32>,
+}
+
 #[derive(Deserialize)]
 struct SyncRequest {
     fetcher: String,
@@ -272,6 +287,12 @@ struct GraphSubgraphResponse {
     center: GraphNodeDto,
     nodes: Vec<GraphNodeDto>,
     edges: Vec<GraphEdgeDto>,
+}
+
+#[derive(Serialize)]
+struct HybridMultiResponse {
+    entity_types: Vec<String>,
+    hits: Vec<MultiEntitySearchHit>,
 }
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -584,6 +605,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/graph/subgraph", get(graph_subgraph))
         .route("/api/graph/node", get(graph_node_detail))
         .route("/api/graph/visual", get(graph_visual))
+        .route("/api/search/hybrid/types", get(hybrid_entity_types))
+        .route("/api/search/hybrid_all", get(hybrid_multi_search))
         .route("/api/readiness", post(check_readiness))
         .route("/api/sync", post(trigger_sync))
         .with_state(state);
@@ -877,6 +900,79 @@ async fn search_candidates(
     }
 
     Ok(results)
+}
+
+fn gather_hybrid_entity_types(state: &AppState) -> ApiResult<Vec<String>> {
+    let offsets = state
+        .storage
+        .catalog
+        .list_ingestion_offsets()
+        .map_err(ApiError::from_storage)?;
+    let mut types = Vec::new();
+    for offset in offsets {
+        if matches!(
+            offset.category,
+            EntityCategory::Node | EntityCategory::Vector
+        ) {
+            types.push(offset.entity_type);
+        }
+    }
+    types.sort();
+    types.dedup();
+    Ok(types)
+}
+
+async fn hybrid_entity_types(State(state): State<AppState>) -> ApiResult<Json<Vec<String>>> {
+    let types = gather_hybrid_entity_types(&state)?;
+    Ok(Json(types))
+}
+
+async fn hybrid_multi_search(
+    State(state): State<AppState>,
+    Query(query): Query<HybridMultiQuery>,
+) -> ApiResult<Json<HybridMultiResponse>> {
+    let mut entity_types: Vec<String> = query
+        .entity_types
+        .as_deref()
+        .map(|raw| {
+            raw.split(',')
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if entity_types.is_empty() {
+        entity_types = gather_hybrid_entity_types(&state)?;
+    }
+
+    if entity_types.is_empty() {
+        return Ok(Json(HybridMultiResponse {
+            entity_types,
+            hits: Vec::new(),
+        }));
+    }
+
+    let query_text = query.q.unwrap_or_default();
+    let trimmed = query_text.trim();
+    if trimmed.is_empty() {
+        return Ok(Json(HybridMultiResponse {
+            entity_types,
+            hits: Vec::new(),
+        }));
+    }
+
+    let alpha = query.alpha.unwrap_or(0.5).clamp(0.0, 1.0);
+    let limit = query.limit.unwrap_or(20).clamp(1, 200);
+
+    let hits = state
+        .storage
+        .search_hybrid_multi(&entity_types, trimmed, alpha, limit)
+        .await
+        .map_err(ApiError::from_storage)?;
+
+    Ok(Json(HybridMultiResponse { entity_types, hits }))
 }
 
 async fn graph_subgraph(

@@ -1,13 +1,12 @@
 use crate::config::StorageConfig;
 use crate::errors::{Result, StorageError};
-use crate::models::{ColumnSummary, HybridSearchHit, TableSummary, TextSearchHit, VectorSearchHit};
+use crate::models::{
+    ColumnSummary, HybridSearchHit, MultiEntitySearchHit, TableSummary, TextSearchHit,
+    VectorSearchHit,
+};
 use crate::utils;
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
-use deltalake::DeltaTable;
-use deltalake::DeltaTableBuilder;
-use deltalake::ObjectStore;
-use deltalake::Path;
 use deltalake::arrow::array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
     TimestampMicrosecondArray, UInt32Array, UInt64Array,
@@ -20,10 +19,14 @@ use deltalake::datafusion::execution::context::{SessionConfig, SessionContext};
 use deltalake::kernel::Action;
 use deltalake::operations::DeltaOps;
 use deltalake::protocol::SaveMode;
+use deltalake::DeltaTable;
+use deltalake::DeltaTableBuilder;
+use deltalake::ObjectStore;
+use deltalake::Path;
 use heed3::RoTxn;
 use helix_db::helix_engine::bm25::bm25::BM25;
-use helix_db::helix_engine::storage_core::HelixGraphStorage;
 use helix_db::helix_engine::storage_core::storage_methods::StorageMethods;
+use helix_db::helix_engine::storage_core::HelixGraphStorage;
 use helix_db::helix_engine::traversal_core::HelixGraphEngine;
 use helix_db::helix_engine::types::{GraphError, VectorError};
 use helix_db::helix_engine::vector_core::hnsw::HNSW;
@@ -88,6 +91,30 @@ pub struct Subgraph {
 }
 
 impl Lake {
+    fn extract_text_field(map: &HashMap<String, JsonValue>, keys: &[&str]) -> Option<String> {
+        for key in keys {
+            if let Some(value) = map.get(*key).and_then(|value| value.as_str()) {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+
+        if let Some(properties) = map.get("properties").and_then(|value| value.as_object()) {
+            for key in keys {
+                if let Some(value) = properties.get(*key).and_then(|value| value.as_str()) {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
     pub async fn new(config: StorageConfig, engine: Arc<HelixGraphEngine>) -> Result<Self> {
         tokio::fs::create_dir_all(&config.lake_path).await?;
         Ok(Self { config, engine })
@@ -2015,6 +2042,63 @@ impl Lake {
         }
 
         Ok(hits)
+    }
+
+    pub async fn search_hybrid_multi(
+        &self,
+        entity_types: &[String],
+        query_text: &str,
+        query_vector: &[f64],
+        alpha: f32,
+        limit: usize,
+    ) -> Result<Vec<MultiEntitySearchHit>> {
+        if entity_types.is_empty() || (query_text.trim().is_empty() && query_vector.is_empty()) {
+            return Ok(Vec::new());
+        }
+
+        let trimmed = query_text.trim();
+        let mut aggregate: Vec<MultiEntitySearchHit> = Vec::new();
+
+        for entity_type in entity_types {
+            let hits = self
+                .search_hybrid(entity_type, trimmed, query_vector, alpha, limit)
+                .await?;
+
+            aggregate.extend(hits.into_iter().map(|hit| {
+                MultiEntitySearchHit {
+                    entity_type: entity_type.clone(),
+                    score: hit.score,
+                    summary: hit
+                        .node
+                        .as_ref()
+                        .and_then(|node| {
+                            Self::extract_text_field(
+                                node,
+                                &["title", "name", "label", "signature", "path"],
+                            )
+                        })
+                        .or_else(|| {
+                            hit.vector.as_ref().and_then(|vector| {
+                                Self::extract_text_field(
+                                    vector,
+                                    &["text", "body", "summary", "content", "preview"],
+                                )
+                            })
+                        }),
+                    node: hit.node,
+                    vector: hit.vector,
+                }
+            }));
+        }
+
+        aggregate.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        aggregate.truncate(limit.max(1));
+
+        Ok(aggregate)
     }
 }
 

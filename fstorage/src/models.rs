@@ -69,6 +69,18 @@ pub struct HybridSearchHit {
     pub vector: Option<HashMap<String, JsonValue>>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MultiEntitySearchHit {
+    pub entity_type: String,
+    pub score: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<HashMap<String, JsonValue>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<HashMap<String, JsonValue>>,
+}
+
 #[derive(Debug, Clone)]
 pub enum SyncBudget {
     ByDuration(std::time::Duration),
