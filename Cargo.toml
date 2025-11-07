@@ -4,9 +4,6 @@ members = [
     "fstorage",
     "gitfetcher",
     "econfetcher",
-    "deps/helix-db",
-    "deps/helix-macros",
-    "deps/metrics",
 ]
 resolver = "2"
 
